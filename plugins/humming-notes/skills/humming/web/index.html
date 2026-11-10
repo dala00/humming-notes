@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Humming Notes</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Humming Notes</h1>
+  <label>曲名 <input id="name" type="text" size="16"></label>
+  <label>BPM <input id="bpm" type="number" min="30" max="300" step="1"></label>
+  <label>拍子 <input id="beatsPerBar" type="number" min="1" max="12" step="1"> /4</label>
+  <label><input id="metronome" type="checkbox"> メトロノーム</label>
+  <label>カウントイン <input id="countInBars" type="number" min="0" max="4" step="1"> 小節</label>
+  <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
+</header>
+
+<section class="transport">
+  <button id="rec" class="rec">● 録音</button>
+  <label>次の録音の楽器 <select id="nextInstrument"></select></label>
+  <button id="play">▶ 再生</button>
+  <button id="stop">■ 停止</button>
+  <button id="undo" title="Ctrl+Z">↶ 元に戻す</button>
+  <span class="spacer"></span>
+  <span class="meter" title="マイク入力レベル"><span id="level"></span></span>
+  <span id="clock">0:00.0</span>
+  <span class="spacer"></span>
+  <button id="exportMp3">MP3 書き出し</button>
+  <button id="exportWav">WAV</button>
+  <button id="exportMidi">MIDI</button>
+</section>
+
+<div id="status" class="status"></div>
+
+<section class="roll">
+  <canvas id="canvas"></canvas>
+</section>
+<p class="hint">
+  ピアノロール: クリックで再生・録音の開始位置、ノートをクリックして選択（↑↓ 音程 / Shift+↑↓ オクターブ / ←→ 位置 / Delete 削除）、ホイールで横スクロール。Space で再生・停止。
+  重ね録りはヘッドホン推奨です（スピーカーだと伴奏をマイクが拾います）。
+</p>
+
+<section>
+  <table id="tracks">
+    <thead>
+      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="empty" class="hint">まだトラックがありません。「● 録音」を押して鼻歌を歌い、もう一度押すと指定した楽器のノートに変換されます。</p>
+</section>
+
+<footer class="hint">
+  このページは Claude Code と同じ <code id="projectPath">project.json</code> を共有しています。Claude に「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
+</footer>
+
+<script src="/vendor/lame.min.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

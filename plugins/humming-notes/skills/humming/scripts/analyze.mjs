@@ -1,0 +1,232 @@
+// Humming -> notes. Pure functions, shared by the browser page and the Node self-test.
+//
+// analyzeTake(samples, sampleRate) returns { notes: [{t, d, p, v}], detuneCents }
+//   t = start in seconds, d = duration in seconds, p = MIDI pitch, v = velocity 0..1
+
+const F_MIN = 65; // C2
+const F_MAX = 1100; // ~C6
+const YIN_THRESHOLD = 0.15;
+
+function downsample(samples, sampleRate) {
+  const factor = Math.max(1, Math.round(sampleRate / 16000));
+  if (factor === 1) return { data: samples, rate: sampleRate };
+  const n = Math.floor(samples.length / factor);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    const base = i * factor;
+    for (let k = 0; k < factor; k++) s += samples[base + k];
+    out[i] = s / factor;
+  }
+  return { data: out, rate: sampleRate / factor };
+}
+
+// YIN pitch detector for one frame. Returns frequency in Hz, or 0 when unvoiced.
+function yin(x, start, len, tauMin, tauMax, rate, scratch) {
+  const d = scratch;
+  let running = 0;
+  d[0] = 1;
+  for (let tau = 1; tau <= tauMax; tau++) {
+    let sum = 0;
+    for (let j = 0; j < len; j++) {
+      const diff = x[start + j] - x[start + j + tau];
+      sum += diff * diff;
+    }
+    running += sum;
+    d[tau] = running > 0 ? (sum * tau) / running : 1;
+  }
+  let tau = -1;
+  for (let t = tauMin; t <= tauMax; t++) {
+    if (d[t] < YIN_THRESHOLD) {
+      while (t + 1 <= tauMax && d[t + 1] < d[t]) t++;
+      tau = t;
+      break;
+    }
+  }
+  if (tau < 0) return 0;
+  let better = tau;
+  if (tau > 1 && tau < tauMax) {
+    const a = d[tau - 1];
+    const b = d[tau];
+    const c = d[tau + 1];
+    const denom = a - 2 * b + c;
+    if (denom !== 0) better = tau + (a - c) / (2 * denom);
+  }
+  return rate / better;
+}
+
+function median(arr) {
+  const s = Array.from(arr).sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+export function analyzeTake(samples, sampleRate, opts = {}) {
+  const minNote = opts.minNoteSec ?? 0.07;
+  const { data, rate } = downsample(samples, sampleRate);
+  const tauMin = Math.max(2, Math.floor(rate / F_MAX));
+  const tauMax = Math.ceil(rate / F_MIN);
+  const len = Math.max(tauMax, Math.round(rate * 0.03));
+  const frame = len + tauMax + 1;
+  const hop = Math.round(rate * 0.01);
+  const hopSec = hop / rate;
+  const count = data.length >= frame ? Math.floor((data.length - frame) / hop) + 1 : 0;
+  if (!count) return { notes: [], detuneCents: 0 };
+
+  const pitch = new Float32Array(count); // MIDI float, 0 = unvoiced
+  const rms = new Float32Array(count);
+  const scratch = new Float32Array(tauMax + 2);
+  for (let i = 0; i < count; i++) {
+    const start = i * hop;
+    let e = 0;
+    for (let j = 0; j < len; j++) e += data[start + j] * data[start + j];
+    rms[i] = Math.sqrt(e / len);
+  }
+  const loud = Array.from(rms).sort((a, b) => a - b)[Math.floor(count * 0.95)] || 0;
+  const gate = Math.max(0.004, loud * 0.08);
+  for (let i = 0; i < count; i++) {
+    if (rms[i] < gate) continue;
+    const f = yin(data, i * hop, len, tauMin, tauMax, rate, scratch);
+    if (f >= F_MIN && f <= F_MAX) pitch[i] = 69 + 12 * Math.log2(f / 440);
+  }
+
+  // Median filter kills single-frame octave jumps and glitches.
+  const smooth = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    if (!pitch[i]) continue;
+    const win = [];
+    for (let k = -2; k <= 2; k++) {
+      const v = pitch[i + k];
+      if (v) win.push(v);
+    }
+    smooth[i] = win.length >= 3 ? median(win) : pitch[i];
+  }
+
+  // People rarely hum at A=440. Estimate the common offset from the semitone grid.
+  let sx = 0;
+  let sy = 0;
+  for (let i = 0; i < count; i++) {
+    if (!smooth[i]) continue;
+    const a = 2 * Math.PI * (smooth[i] - Math.round(smooth[i]));
+    sx += Math.cos(a);
+    sy += Math.sin(a);
+  }
+  const detune = sx || sy ? Math.atan2(sy, sx) / (2 * Math.PI) : 0;
+
+  // Segment frames into raw notes: split on silence and on pitch moving away.
+  const segs = [];
+  let cur = null;
+  let gap = 0;
+  let away = 0;
+  const close = () => {
+    if (cur) segs.push(cur);
+    cur = null;
+    away = 0;
+  };
+  for (let i = 0; i < count; i++) {
+    const m = smooth[i] ? smooth[i] - detune : 0;
+    if (!m) {
+      gap++;
+      if (cur && gap > 2) close();
+      continue;
+    }
+    gap = 0;
+    if (!cur) {
+      cur = { start: i, end: i + 1, vals: [m] };
+      continue;
+    }
+    const center = median(cur.vals);
+    if (Math.abs(m - center) > 0.7) {
+      away++;
+      if (away >= 3) {
+        const first = i - away + 1;
+        const moved = cur.vals.splice(cur.vals.length - (away - 1), away - 1);
+        cur.end = first;
+        segs.push(cur);
+        cur = { start: first, end: i + 1, vals: moved.concat([m]) };
+        away = 0;
+      } else {
+        cur.vals.push(m);
+        cur.end = i + 1;
+      }
+    } else {
+      away = 0;
+      cur.vals.push(m);
+      cur.end = i + 1;
+    }
+  }
+  close();
+
+  // Split a held pitch that was re-articulated ("na na na"): a clear dip in loudness.
+  const split = [];
+  const minFrames = Math.max(2, Math.round(minNote / hopSec));
+  for (const s of segs) {
+    let from = s.start;
+    let peak = 0;
+    let dip = false;
+    for (let i = s.start; i < s.end; i++) {
+      peak = Math.max(peak, rms[i]);
+      const isMin = i > from + minFrames && i < s.end - minFrames && rms[i] <= rms[i - 1] && rms[i] < rms[i + 1];
+      if (!isMin || rms[i] > peak * 0.4) continue;
+      let ahead = 0;
+      for (let k = i + 1; k < Math.min(s.end, i + 12); k++) ahead = Math.max(ahead, rms[k]);
+      if (rms[i] > ahead * 0.4) continue;
+      split.push({ start: from, end: i, vals: s.vals.slice(from - s.start, i - s.start), dip });
+      from = i;
+      peak = 0;
+      dip = true;
+    }
+    split.push({ start: from, end: s.end, vals: s.vals.slice(from - s.start), dip });
+  }
+
+  // Short blips: glue onto a touching neighbour (pitch scoops), otherwise drop.
+  const kept = [];
+  for (let i = 0; i < split.length; i++) {
+    const s = split[i];
+    if (!s.vals.length) continue;
+    if (s.end - s.start >= minFrames) {
+      kept.push(s);
+      continue;
+    }
+    const prev = kept[kept.length - 1];
+    const next = split[i + 1];
+    if (next && next.start - s.end <= 2 && next.end - next.start >= minFrames) {
+      next.start = s.start; // scoop into the next note
+      next.dip = next.dip && s.dip;
+    } else if (prev && s.start - prev.end <= 2) {
+      prev.end = s.end; // tail of the previous note
+    }
+  }
+
+  let maxRms = 0;
+  const raw = kept.map((s) => {
+    let e = 0;
+    for (let i = s.start; i < s.end; i++) e += rms[i];
+    const level = e / (s.end - s.start);
+    maxRms = Math.max(maxRms, level);
+    return { t: s.start * hopSec, d: (s.end - s.start) * hopSec, p: Math.round(median(s.vals)), level, dip: s.dip };
+  });
+
+  // Merge touching notes that ended up on the same pitch (vibrato around a boundary).
+  const notes = [];
+  for (const n of raw) {
+    const prev = notes[notes.length - 1];
+    if (prev && prev.p === n.p && !n.dip && n.t - (prev.t + prev.d) < hopSec * 1.5) {
+      prev.d = n.t + n.d - prev.t;
+      prev.level = Math.max(prev.level, n.level);
+      continue;
+    }
+    notes.push(n);
+  }
+
+  const round3 = (x) => Math.round(x * 1000) / 1000;
+  return {
+    detuneCents: Math.round(detune * 100),
+    notes: notes.map((n) => ({
+      t: round3(n.t),
+      d: round3(n.d),
+      p: n.p,
+      v: Math.round(Math.min(1, 0.45 + 0.55 * (maxRms ? n.level / maxRms : 1)) * 100) / 100,
+    })),
+  };
+}

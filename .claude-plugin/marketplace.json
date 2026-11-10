@@ -1,0 +1,14 @@
+{
+  "name": "humming-notes",
+  "description": "鼻歌から曲を作る Claude Code スキルを配布するマーケットプレイス",
+  "owner": {
+    "name": "dala00"
+  },
+  "plugins": [
+    {
+      "name": "humming-notes",
+      "source": "./plugins/humming-notes",
+      "description": "鼻歌をブラウザで録音して楽器のノートに変換し、重ね録りして MP3 / WAV / MIDI に書き出す"
+    }
+  ]
+}
