@@ -4,7 +4,7 @@ import { analyzeTake } from './analyze.mjs';
 import { buildMidi, normalizeProject, effectiveNotes } from './shared.mjs';
 
 const SR = 48000;
-function hum(melody, { detune = 0, vibrato = 0.2, noise = 0.01 } = {}) {
+function hum(melody, { detune = 0, vibrato = 0.2, noise = 0.01, breathy = false } = {}) {
   const total = melody.reduce((m, n) => Math.max(m, n.t + n.d), 0) + 0.5;
   const out = new Float32Array(Math.round(total * SR));
   for (const n of melody) {
@@ -17,6 +17,11 @@ function hum(melody, { detune = 0, vibrato = 0.2, noise = 0.01 } = {}) {
       const f = 440 * Math.pow(2, (midi - 69) / 12);
       phase += (2 * Math.PI * f) / SR;
       const env = Math.min(1, tt / 0.03, (n.d - tt) / 0.04);
+      // A breathy dropout: the tone turns to noise for 50 ms but stays loud.
+      if (breathy && tt > n.d / 2 && tt < n.d / 2 + 0.05) {
+        out[base + i] += 0.25 * (Math.random() * 2 - 1);
+        continue;
+      }
       out[base + i] += 0.3 * env * (Math.sin(phase) + 0.5 * Math.sin(2 * phase) + 0.25 * Math.sin(3 * phase));
     }
   }
@@ -25,11 +30,11 @@ function hum(melody, { detune = 0, vibrato = 0.2, noise = 0.01 } = {}) {
 }
 
 let failed = 0;
-function check(name, melody, opts) {
-  const { notes, detuneCents } = analyzeTake(hum(melody, opts), SR);
+function check(name, melody, opts, expected = melody.map((n) => n.p)) {
+  const { notes, detuneCents } = analyzeTake(hum(melody, opts), SR, opts);
   const ok =
     notes.length === melody.length &&
-    notes.every((n, i) => n.p === melody[i].p && Math.abs(n.t - melody[i].t) < 0.06 && Math.abs(n.d - melody[i].d) < 0.1);
+    notes.every((n, i) => n.p === expected[i] && Math.abs(n.t - melody[i].t) < 0.06 && Math.abs(n.d - melody[i].d) < 0.1);
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name} (detune ${detuneCents}c)`);
   if (!ok) {
     failed++;
@@ -45,6 +50,11 @@ check('legato scale', [57, 59, 60, 62, 64].map((p, i) => ({ t: 0.2 + i * 0.4, d:
 check('low male voice', [43, 45, 47, 48].map((p, i) => ({ t: 0.2 + i * 0.6, d: 0.5, p })));
 check('high whistle range', [79, 81, 83, 84].map((p, i) => ({ t: 0.2 + i * 0.3, d: 0.25, p })), { vibrato: 0.05 });
 check('fast notes', [64, 62, 60, 62, 64, 64, 64].map((p, i) => ({ t: 0.2 + i * 0.2, d: 0.14, p })), { vibrato: 0 });
+
+const sloppy = [60, 62, 63.4, 65, 67, 65, 63.6, 62, 60].map((p, i) => ({ t: 0.2 + i * 0.45, d: 0.35, p }));
+check('off-pitch notes pulled onto the key', sloppy, { vibrato: 0.05 }, [60, 62, 64, 65, 67, 65, 64, 62, 60]);
+check('same take without key snapping', sloppy, { vibrato: 0.05, snapToScale: false }, [60, 62, 63, 65, 67, 65, 64, 62, 60]);
+check('breathy dropouts do not split notes', [60, 64, 67].map((p, i) => ({ t: 0.2 + i * 0.7, d: 0.6, p })), { breathy: true });
 
 const silent = analyzeTake(new Float32Array(SR * 2).map(() => 0.002 * (Math.random() * 2 - 1)), SR);
 console.log(`${silent.notes.length === 0 ? 'ok  ' : 'FAIL'} silence gives no notes`);

@@ -14,6 +14,7 @@
   <label>拍子 <input id="beatsPerBar" type="number" min="1" max="12" step="1"> /4</label>
   <label><input id="metronome" type="checkbox"> メトロノーム</label>
   <label>カウントイン <input id="countInBars" type="number" min="0" max="4" step="1"> 小節</label>
+  <label title="録音をノートに変換するとき、調から外れたあいまいな音を調の音に寄せます。"><input id="snapToScale" type="checkbox"> 調に寄せる</label>
   <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
 </header>
 
@@ -45,7 +46,7 @@
 <section>
   <table id="tracks">
     <thead>
-      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th></tr>
+      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th><th></th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -53,7 +54,7 @@
 </section>
 
 <footer class="hint">
-  このページは Claude Code と同じ <code id="projectPath">project.json</code> を共有しています。Claude に「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
+  このページは Claude Code と同じ <code id="projectPath">project.json</code> を共有しています。変換が粗いときは Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に直します。ほかにも「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
 </footer>
 
 <script src="/vendor/lame.min.js"></script>

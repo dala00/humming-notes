@@ -5,8 +5,11 @@
 1. ブラウザのページで鼻歌を録音する
 2. 指定した楽器のノート（MIDI 相当）に変換される
 3. それを鳴らしながら別のパートを重ね録りする
-4. Claude に「ベースにして」「ハモリを足して」などと頼んで整える
-5. MP3 / WAV / MIDI に書き出す
+4. Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に変換し直す
+5. Claude に「ベースにして」「ハモリを足して」などと頼んで整える
+6. MP3 / WAV / MIDI に書き出す
+
+基本操作はブラウザ、丁寧な変換と編曲は Claude Code、という分担です。ページ内の変換は即時の下書きで、清書前のノートはいつでも戻せます。
 
 ## インストール
 
@@ -29,7 +32,7 @@
 ```
 plugins/humming-notes/skills/humming/
   SKILL.md              Claude 向けの手順と project.json の仕様
-  scripts/humming.mjs   ローカルサーバー兼 CLI（serve / status / export / midi）
+  scripts/humming.mjs   ローカルサーバー兼 CLI（serve / status / export / midi / curve / set-notes / restore）
   scripts/analyze.mjs   鼻歌 → ノート変換（YIN 法による音程検出）
   scripts/shared.mjs    楽器一覧、クオンタイズ、MIDI ファイル生成
   scripts/selftest.mjs  変換ロジックのテスト（node selftest.mjs）

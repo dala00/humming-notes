@@ -1,11 +1,14 @@
-// Humming -> notes. Pure functions, shared by the browser page and the Node self-test.
+// Humming -> notes. Pure functions, shared by the browser page, the CLI and the self-test.
 //
-// analyzeTake(samples, sampleRate) returns { notes: [{t, d, p, v}], detuneCents }
+// trackPitch(samples, sampleRate)  -> frame-level pitch curve (what the singer actually did)
+// analyzeTake(samples, sampleRate) -> { notes: [{t, d, p, v}], detuneCents, key }
 //   t = start in seconds, d = duration in seconds, p = MIDI pitch, v = velocity 0..1
 
 const F_MIN = 65; // C2
 const F_MAX = 1100; // ~C6
 const YIN_THRESHOLD = 0.15;
+const MAJOR = [0, 2, 4, 5, 7, 9, 11];
+export const PITCH_CLASS_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 function downsample(samples, sampleRate) {
   const factor = Math.max(1, Math.round(sampleRate / 16000));
@@ -61,8 +64,10 @@ function median(arr) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-export function analyzeTake(samples, sampleRate, opts = {}) {
-  const minNote = opts.minNoteSec ?? 0.07;
+// Frame-level analysis, one frame every 10 ms.
+//   pitch[i]: MIDI note as a float (0 = no pitch), rms[i]: loudness,
+//   detune: how far the singer sits from the A=440 semitone grid, in semitones.
+export function trackPitch(samples, sampleRate) {
   const { data, rate } = downsample(samples, sampleRate);
   const tauMin = Math.max(2, Math.floor(rate / F_MAX));
   const tauMax = Math.ceil(rate / F_MIN);
@@ -71,10 +76,11 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
   const hop = Math.round(rate * 0.01);
   const hopSec = hop / rate;
   const count = data.length >= frame ? Math.floor((data.length - frame) / hop) + 1 : 0;
-  if (!count) return { notes: [], detuneCents: 0 };
-
-  const pitch = new Float32Array(count); // MIDI float, 0 = unvoiced
+  const pitch = new Float32Array(count);
   const rms = new Float32Array(count);
+  if (!count) return { hopSec, count, pitch, rms, detune: 0 };
+
+  const raw = new Float32Array(count);
   const scratch = new Float32Array(tauMax + 2);
   for (let i = 0; i < count; i++) {
     const start = i * hop;
@@ -87,54 +93,89 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
   for (let i = 0; i < count; i++) {
     if (rms[i] < gate) continue;
     const f = yin(data, i * hop, len, tauMin, tauMax, rate, scratch);
-    if (f >= F_MIN && f <= F_MAX) pitch[i] = 69 + 12 * Math.log2(f / 440);
+    if (f >= F_MIN && f <= F_MAX) raw[i] = 69 + 12 * Math.log2(f / 440);
   }
 
   // Median filter kills single-frame octave jumps and glitches.
-  const smooth = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    if (!pitch[i]) continue;
+    if (!raw[i]) continue;
     const win = [];
     for (let k = -2; k <= 2; k++) {
-      const v = pitch[i + k];
+      const v = raw[i + k];
       if (v) win.push(v);
     }
-    smooth[i] = win.length >= 3 ? median(win) : pitch[i];
+    pitch[i] = win.length >= 3 ? median(win) : raw[i];
   }
 
   // People rarely hum at A=440. Estimate the common offset from the semitone grid.
   let sx = 0;
   let sy = 0;
   for (let i = 0; i < count; i++) {
-    if (!smooth[i]) continue;
-    const a = 2 * Math.PI * (smooth[i] - Math.round(smooth[i]));
+    if (!pitch[i]) continue;
+    const a = 2 * Math.PI * (pitch[i] - Math.round(pitch[i]));
     sx += Math.cos(a);
     sy += Math.sin(a);
   }
   const detune = sx || sy ? Math.atan2(sy, sx) / (2 * Math.PI) : 0;
+  return { hopSec, count, pitch, rms, detune, gate };
+}
+
+// Best-fitting major scale (its relative minor shares the same notes).
+// weights: 12 numbers, how much each pitch class was sung. Returns null when unclear.
+export function estimateKey(weights) {
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (total <= 0) return null;
+  let best = null;
+  for (let tonic = 0; tonic < 12; tonic++) {
+    let inScale = 0;
+    for (const step of MAJOR) inScale += weights[(tonic + step) % 12];
+    // Tie-break toward keys whose tonic and fifth are actually used.
+    const score = inScale + 0.1 * (weights[tonic] + weights[(tonic + 7) % 12]);
+    if (!best || score > best.score) best = { tonic, score, fit: inScale / total };
+  }
+  return {
+    tonic: best.tonic,
+    fit: best.fit,
+    name: `${PITCH_CLASS_NAMES[best.tonic]} メジャー / ${PITCH_CLASS_NAMES[(best.tonic + 9) % 12]} マイナー`,
+    scale: MAJOR.map((s) => (best.tonic + s) % 12),
+  };
+}
+
+// opts.snapToScale (default true): pull ambiguous out-of-key notes onto the key.
+// opts.contextNotes: notes already in the song ([{p, d}]), used to judge the key.
+export function analyzeTake(samples, sampleRate, opts = {}) {
+  const minNote = opts.minNoteSec ?? 0.07;
+  const { hopSec, count, pitch, rms, detune } = trackPitch(samples, sampleRate);
+  if (!count) return { notes: [], detuneCents: 0, key: null };
 
   // Segment frames into raw notes: split on silence and on pitch moving away.
   const segs = [];
   let cur = null;
   let gap = 0;
   let away = 0;
+  let level = 0;
   const close = () => {
     if (cur) segs.push(cur);
     cur = null;
     away = 0;
   };
   for (let i = 0; i < count; i++) {
-    const m = smooth[i] ? smooth[i] - detune : 0;
+    const m = pitch[i] ? pitch[i] - detune : 0;
     if (!m) {
       gap++;
-      if (cur && gap > 2) close();
+      // A breathy dropout keeps its loudness; a consonant or a rest does not.
+      const soft = cur && rms[i] > level * 0.3;
+      if (cur && gap > (soft ? 8 : 2)) close();
       continue;
     }
+    if (gap > 0) away = 0;
     gap = 0;
     if (!cur) {
       cur = { start: i, end: i + 1, vals: [m] };
+      level = rms[i];
       continue;
     }
+    level = level * 0.9 + rms[i] * 0.1;
     const center = median(cur.vals);
     if (Math.abs(m - center) > 0.7) {
       away++;
@@ -161,22 +202,26 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
   const split = [];
   const minFrames = Math.max(2, Math.round(minNote / hopSec));
   for (const s of segs) {
+    // vals has one entry per voiced frame; map frame index -> vals index.
+    const voicedIdx = [];
+    for (let i = s.start; i < s.end; i++) if (pitch[i]) voicedIdx.push(i);
+    const valsBetween = (a, b) => s.vals.filter((_, k) => voicedIdx[k] >= a && voicedIdx[k] < b);
     let from = s.start;
     let peak = 0;
     let dip = false;
     for (let i = s.start; i < s.end; i++) {
       peak = Math.max(peak, rms[i]);
       const isMin = i > from + minFrames && i < s.end - minFrames && rms[i] <= rms[i - 1] && rms[i] < rms[i + 1];
-      if (!isMin || rms[i] > peak * 0.4) continue;
+      if (!isMin || !pitch[i] || rms[i] > peak * 0.4) continue;
       let ahead = 0;
       for (let k = i + 1; k < Math.min(s.end, i + 12); k++) ahead = Math.max(ahead, rms[k]);
       if (rms[i] > ahead * 0.4) continue;
-      split.push({ start: from, end: i, vals: s.vals.slice(from - s.start, i - s.start), dip });
+      split.push({ start: from, end: i, vals: valsBetween(from, i), dip });
       from = i;
       peak = 0;
       dip = true;
     }
-    split.push({ start: from, end: s.end, vals: s.vals.slice(from - s.start), dip });
+    split.push({ start: from, end: s.end, vals: valsBetween(from, s.end), dip });
   }
 
   // Short blips: glue onto a touching neighbour (pitch scoops), otherwise drop.
@@ -198,23 +243,68 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
     }
   }
 
+  // Judge the key from what was sung (plus the rest of the song).
+  const weights = new Array(12).fill(0);
+  let sungSec = 0;
+  for (const s of kept) {
+    const pc = ((Math.round(median(s.vals)) % 12) + 12) % 12;
+    weights[pc] += (s.end - s.start) * hopSec;
+    sungSec += (s.end - s.start) * hopSec;
+  }
+  for (const n of opts.contextNotes || []) {
+    weights[((Math.round(n.p) % 12) + 12) % 12] += n.d;
+    sungSec += n.d;
+  }
+  let key = estimateKey(weights);
+  if (key && (key.fit < 0.8 || sungSec < 1.5)) key = null; // too little evidence to act on
+  const snap = key && opts.snapToScale !== false;
+
   let maxRms = 0;
   const raw = kept.map((s) => {
     let e = 0;
     for (let i = s.start; i < s.end; i++) e += rms[i];
-    const level = e / (s.end - s.start);
-    maxRms = Math.max(maxRms, level);
-    return { t: s.start * hopSec, d: (s.end - s.start) * hopSec, p: Math.round(median(s.vals)), level, dip: s.dip };
+    const lvl = e / (s.end - s.start);
+    maxRms = Math.max(maxRms, lvl);
+    const fl = median(s.vals);
+    const d = (s.end - s.start) * hopSec;
+    let p = Math.round(fl);
+    if (snap && !key.scale.includes(((p % 12) + 12) % 12)) {
+      // Out of key. Unless it was held long and dead on pitch, the singer meant a neighbour.
+      const lean = fl - p;
+      if (Math.abs(lean) >= 0.15 || d < 0.2) p += lean >= 0 ? 1 : -1;
+    }
+    return { t: s.start * hopSec, d, p, level: lvl, dip: s.dip };
   });
 
-  // Merge touching notes that ended up on the same pitch (vibrato around a boundary).
-  const notes = [];
+  // Merge touching notes that ended up on the same pitch (vibrato or a scoop across a boundary).
+  const merged = [];
   for (const n of raw) {
-    const prev = notes[notes.length - 1];
+    const prev = merged[merged.length - 1];
     if (prev && prev.p === n.p && !n.dip && n.t - (prev.t + prev.d) < hopSec * 1.5) {
       prev.d = n.t + n.d - prev.t;
       prev.level = Math.max(prev.level, n.level);
       continue;
+    }
+    merged.push(n);
+  }
+
+  // A short slide into (or out of) a much longer neighbour is part of that note.
+  const notes = [];
+  for (let i = 0; i < merged.length; i++) {
+    const n = merged[i];
+    const prev = notes[notes.length - 1];
+    const next = merged[i + 1];
+    if (n.d < 0.1) {
+      if (next && next.t - (n.t + n.d) < hopSec * 2.5 && Math.abs(next.p - n.p) <= 2 && next.d >= n.d * 2 && !next.dip) {
+        next.d = next.t + next.d - n.t;
+        next.t = n.t;
+        next.dip = n.dip;
+        continue;
+      }
+      if (prev && n.t - (prev.t + prev.d) < hopSec * 2.5 && Math.abs(prev.p - n.p) <= 2 && prev.d >= n.d * 2 && !n.dip) {
+        prev.d = n.t + n.d - prev.t;
+        continue;
+      }
     }
     notes.push(n);
   }
@@ -222,6 +312,7 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
   const round3 = (x) => Math.round(x * 1000) / 1000;
   return {
     detuneCents: Math.round(detune * 100),
+    key: key ? { tonic: key.tonic, name: key.name } : null,
     notes: notes.map((n) => ({
       t: round3(n.t),
       d: round3(n.d),

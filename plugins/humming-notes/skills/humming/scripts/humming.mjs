@@ -5,6 +5,9 @@
 //   node humming.mjs status [--port 4173]
 //   node humming.mjs export <mp3|wav> [--port 4173]      (rendered by the open page)
 //   node humming.mjs midi   [--project <dir>] [--out file.mid]   (no page needed)
+//   node humming.mjs curve     --track <id|番号|名前> [--project <dir>] [--from sec] [--to sec]
+//   node humming.mjs set-notes --track <id|番号|名前> --notes <file.json> [--project <dir>]
+//   node humming.mjs restore   --track <id|番号|名前> [--project <dir>]
 //
 // No npm dependencies. Node 18+.
 
@@ -16,6 +19,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildMidi, defaultProject, normalizeProject, GM_NAMES } from './shared.mjs';
+import { trackPitch, analyzeTake } from './analyze.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, '..', 'web');
@@ -352,14 +356,163 @@ function cliMidi(args) {
   console.log(out);
 }
 
+// ---------------------------------------------------------------- clean-up support
+
+function findTrack(project, sel) {
+  if (typeof sel !== 'string') throw new Error('--track <id|番号|名前> を指定してください');
+  const byId = project.tracks.find((t) => t.id === sel);
+  const byIndex = /^\d+$/.test(sel) ? project.tracks[Number(sel) - 1] : null;
+  const byName = project.tracks.find((t) => t.name === sel);
+  const track = byId || byIndex || byName;
+  if (!track) throw new Error(`トラック "${sel}" がありません: ${project.tracks.map((t, i) => `${i + 1}=${t.id}(${t.name})`).join(', ')}`);
+  return track;
+}
+
+function loadProjectOrFail(args) {
+  const dir = projectDir(args);
+  const project = readProject(dir);
+  if (!project) throw new Error(`${path.join(dir, 'project.json')} がありません`);
+  return { dir, project };
+}
+
+function writeProject(dir, project) {
+  const file = path.join(dir, 'project.json');
+  fs.writeFileSync(file + '.tmp', JSON.stringify(normalizeProject(project), null, 2));
+  fs.renameSync(file + '.tmp', file);
+}
+
+function readWav(file) {
+  const buf = fs.readFileSync(file);
+  if (buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WAVE') throw new Error('WAV ファイルではありません');
+  let pos = 12;
+  let fmt = null;
+  while (pos + 8 <= buf.length) {
+    const id = buf.toString('latin1', pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    if (id === 'fmt ') fmt = { channels: buf.readUInt16LE(pos + 10), sampleRate: buf.readUInt32LE(pos + 12), bits: buf.readUInt16LE(pos + 22) };
+    if (id === 'data') {
+      if (!fmt || fmt.bits !== 16) throw new Error('16bit PCM の WAV だけ読めます');
+      const n = Math.floor(Math.min(size, buf.length - pos - 8) / 2 / fmt.channels);
+      const samples = new Float32Array(n);
+      for (let i = 0; i < n; i++) samples[i] = buf.readInt16LE(pos + 8 + i * 2 * fmt.channels) / 32768;
+      return { samples, sampleRate: fmt.sampleRate };
+    }
+    pos += 8 + size + (size % 2);
+  }
+  throw new Error('WAV にデータがありません');
+}
+
+const fmtNotes = (notes) => notes.map((n) => `${n.t.toFixed(2)}:${n.p}/${n.d.toFixed(2)}`).join('  ');
+
+// Print what the singer actually did, compactly enough for Claude to read.
+function cliCurve(args) {
+  const { dir, project } = loadProjectOrFail(args);
+  const track = findTrack(project, args.track);
+  if (!track.take) throw new Error('このトラックには元の録音がありません（Claude が作ったトラックなど）');
+  const { samples, sampleRate } = readWav(path.join(dir, track.take));
+  const { hopSec, count, pitch, rms, detune } = trackPitch(samples, sampleRate);
+  const auto = analyzeTake(samples, sampleRate, { snapToScale: false });
+  const from = Number(args.from) || 0;
+  const to = args.to != null ? Number(args.to) : Infinity;
+  const STEP = 3; // frames per printed value (30 ms)
+  const PER_LINE = 10;
+  let maxRms = 0;
+  for (let i = 0; i < count; i++) maxRms = Math.max(maxRms, rms[i]);
+
+  const beat = 60 / project.bpm;
+  const out = [];
+  out.push(`track ${track.id} "${track.name}" (${track.instrument})  transpose ${track.transpose}  offsetMs ${track.offsetMs}  quantize ${track.quantize}`);
+  out.push(`bpm ${project.bpm}  1拍=${beat.toFixed(3)}s  1小節=${(beat * project.beatsPerBar).toFixed(3)}s (${project.beatsPerBar}拍)  録音の長さ ${(count * hopSec).toFixed(2)}s`);
+  out.push(`全体のチューニングずれ: ${Math.round(detune * 100)} セント（下の音高はこのずれを差し引いた値）`);
+  out.push(`調の推定（機械）: ${auto.key ? auto.key.name : '不明'}`);
+  out.push('');
+  out.push(`現在のノート (開始秒:MIDI番号/長さ秒):\n  ${fmtNotes(track.notes) || '(なし)'}`);
+  if (track.original) out.push(`清書前のノート:\n  ${fmtNotes(track.original)}`);
+  out.push('');
+  out.push('音高曲線: 30ms ごとの「MIDI音高(小数)/音量0-9」。 . は音程なし（息・子音・無音）。行頭は秒。');
+  out.push('小数部は半音内のずれ（例 62.4 は D より 40 セント高い）。フレーズは 150ms 以上の無音で区切り。');
+
+  // Phrases: voiced stretches separated by >= 150 ms without pitch.
+  const phrases = [];
+  let start = -1;
+  let lastVoiced = -1;
+  for (let i = 0; i < count; i++) {
+    if (!pitch[i]) continue;
+    if (start < 0) start = i;
+    else if (i - lastVoiced > 15) {
+      phrases.push([start, lastVoiced + 1]);
+      start = i;
+    }
+    lastVoiced = i;
+  }
+  if (start >= 0) phrases.push([start, lastVoiced + 1]);
+
+  for (const [a, b] of phrases) {
+    if (b * hopSec < from || a * hopSec > to) continue;
+    out.push('');
+    out.push(`[${(a * hopSec).toFixed(2)}–${(b * hopSec).toFixed(2)}s]`);
+    let line = [];
+    let lineStart = a;
+    for (let i = a; i < b; i += STEP) {
+      const vals = [];
+      let lv = 0;
+      for (let k = i; k < Math.min(b, i + STEP); k++) {
+        if (pitch[k]) vals.push(pitch[k] - detune);
+        lv = Math.max(lv, rms[k]);
+      }
+      vals.sort((x, y) => x - y);
+      const level = Math.min(9, Math.round((lv / (maxRms || 1)) * 9));
+      line.push(vals.length ? `${vals[vals.length >> 1].toFixed(1)}/${level}` : `  .  /${level}`.slice(1));
+      if (line.length === PER_LINE || i + STEP >= b) {
+        out.push(`  ${(lineStart * hopSec).toFixed(2).padStart(6)}  ${line.join(' ')}`);
+        line = [];
+        lineStart = i + STEP;
+      }
+    }
+  }
+  console.log(out.join('\n'));
+}
+
+function cliSetNotes(args) {
+  const { dir, project } = loadProjectOrFail(args);
+  const track = findTrack(project, args.track);
+  if (typeof args.notes !== 'string') throw new Error('--notes <file.json> を指定してください（[{t,d,p,v?}, ...] の配列）');
+  const parsed = JSON.parse(fs.readFileSync(path.resolve(args.notes), 'utf8'));
+  const notes = Array.isArray(parsed) ? parsed : parsed.notes;
+  if (!Array.isArray(notes) || !notes.length) throw new Error('ノートの配列が空です');
+  for (const n of notes) {
+    if (![n.t, n.d, n.p].every((x) => typeof x === 'number' && isFinite(x)) || n.d <= 0 || n.t < 0 || n.p < 0 || n.p > 127) {
+      throw new Error(`不正なノート: ${JSON.stringify(n)}`);
+    }
+  }
+  // Keep the pre-clean-up notes once, so the page can flip back to them.
+  if (!track.original) track.original = track.notes;
+  track.notes = notes;
+  writeProject(dir, project);
+  console.log(`${track.name}: ${track.original.length} ノート → ${notes.length} ノートに置き換えました（清書前はページの「清書前と入れ替え」か restore で戻せます）`);
+}
+
+function cliRestore(args) {
+  const { dir, project } = loadProjectOrFail(args);
+  const track = findTrack(project, args.track);
+  if (!track.original) throw new Error('清書前のノートは保存されていません');
+  track.notes = track.original;
+  track.original = null;
+  writeProject(dir, project);
+  console.log(`${track.name}: 清書前の ${track.notes.length} ノートに戻しました`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || 'serve';
   if (cmd === 'serve') return serve(args);
   if (cmd === 'midi') return cliMidi(args);
   if (cmd === 'export') return cliExport(args);
+  if (cmd === 'curve') return cliCurve(args);
+  if (cmd === 'set-notes') return cliSetNotes(args);
+  if (cmd === 'restore') return cliRestore(args);
   if (cmd === 'status') return console.log(JSON.stringify(await api(Number(args.port) || DEFAULT_PORT, '/api/status'), null, 2));
-  throw new Error(`unknown command: ${cmd} (serve | status | export | midi)`);
+  throw new Error(`unknown command: ${cmd} (serve | status | export | midi | curve | set-notes | restore)`);
 }
 
 main().catch((e) => {

@@ -521,7 +521,8 @@ function encodeWav(channels, sampleRate) {
 async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project.next.instrument) {
   status('ノートに変換中…');
   await sleep(30);
-  const { notes, detuneCents } = analyzeTake(samplesIn, sampleRate);
+  const contextNotes = project.tracks.flatMap((tr) => tr.notes.map((n) => ({ p: n.p + tr.transpose, d: n.d })));
+  const { notes, detuneCents } = analyzeTake(samplesIn, sampleRate, { snapToScale: project.snapToScale, contextNotes });
   if (!notes.length && instrument !== 'voice') {
     status('音程を検出できませんでした。マイクに近づいて「ラ」「ナ」などではっきり歌ってみてください。', 'warn');
     return null;
@@ -554,6 +555,7 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
       quantize: 0,
       offsetMs: 0,
       take,
+      original: null,
       notes: notes.map((n) => ({ ...n, t: round3(n.t + startPos) })),
     });
     selectedTrack = id;
@@ -704,6 +706,7 @@ function render() {
     if (active !== $(id)) $(id).value = project[id];
   }
   $('metronome').checked = project.metronome;
+  $('snapToScale').checked = project.snapToScale;
   fillInstrumentSelect($('nextInstrument'), project.next.instrument);
   $('empty').hidden = project.tracks.length > 0;
   $('tracks').hidden = project.tracks.length === 0;
@@ -735,6 +738,18 @@ function render() {
           selectedNote = null;
         }),
     });
+    // After Claude's clean-up the pre-clean-up notes are kept; let the user flip between them.
+    const swap = el('button', {
+      textContent: '清書前と入れ替え',
+      title: 'Claude が清書する前のノートと入れ替えます（もう一度押すと戻ります）',
+      hidden: !tr.original,
+      onclick: () =>
+        change(() => {
+          const t = trackById(id);
+          [t.notes, t.original] = [t.original, t.notes];
+          selectedNote = null;
+        }),
+    });
     const row = el(
       'tr',
       { className: id === selectedTrack ? 'sel' : '' },
@@ -747,6 +762,7 @@ function render() {
       el('td', {}, quant),
       el('td', {}, offset),
       el('td', {}, String(tr.notes.length)),
+      el('td', {}, swap),
       el('td', {}, del)
     );
     row.addEventListener('mousedown', () => {
@@ -947,6 +963,7 @@ function bind() {
   num('countInBars', 'countInBars');
   num('latencyMs', 'latencyMs');
   $('metronome').addEventListener('change', (e) => change(() => (project.metronome = e.target.checked)));
+  $('snapToScale').addEventListener('change', (e) => change(() => (project.snapToScale = e.target.checked)));
   $('nextInstrument').addEventListener('change', (e) => change(() => (project.next.instrument = e.target.value)));
   $('rec').addEventListener('click', () => (mode === 'recording' ? stopRecording() : record()));
   $('play').addEventListener('click', play);

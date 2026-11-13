@@ -57,6 +57,7 @@ export function defaultProject(name = 'humming') {
     metronome: true,
     countInBars: 1,
     latencyMs: 0,
+    snapToScale: true,
     next: { instrument: 'acoustic_grand_piano' },
     tracks: [],
   };
@@ -64,6 +65,18 @@ export function defaultProject(name = 'humming') {
 
 function clamp(x, lo, hi) {
   return Math.min(hi, Math.max(lo, x));
+}
+
+function cleanNotes(notes) {
+  return (Array.isArray(notes) ? notes : [])
+    .map((n) => ({
+      t: Number(n.t),
+      d: Number(n.d),
+      p: Math.round(Number(n.p)),
+      v: n.v == null ? 0.8 : Number(n.v),
+    }))
+    .filter((n) => isFinite(n.t) && isFinite(n.d) && isFinite(n.p) && n.d > 0)
+    .sort((a, b) => a.t - b.t);
 }
 
 // Fill in missing fields so a hand-edited file never crashes the page.
@@ -74,6 +87,7 @@ export function normalizeProject(p) {
   out.beatsPerBar = clamp(Math.round(Number(out.beatsPerBar) || 4), 1, 12);
   out.countInBars = clamp(Math.round(Number(out.countInBars) || 0), 0, 4);
   out.metronome = !!out.metronome;
+  out.snapToScale = out.snapToScale !== false;
   out.latencyMs = Number(out.latencyMs) || 0;
   out.next = { instrument: 'acoustic_grand_piano', ...(out.next || {}) };
   out.tracks = (Array.isArray(out.tracks) ? out.tracks : []).map((t, i) => ({
@@ -86,14 +100,9 @@ export function normalizeProject(p) {
     quantize: Math.round(Number(t.quantize) || 0),
     offsetMs: Number(t.offsetMs) || 0,
     take: t.take || null,
-    notes: (Array.isArray(t.notes) ? t.notes : [])
-      .map((n) => ({
-        t: Number(n.t),
-        d: Number(n.d),
-        p: Math.round(Number(n.p)),
-        v: n.v == null ? 0.8 : Number(n.v),
-      }))
-      .filter((n) => isFinite(n.t) && isFinite(n.d) && isFinite(n.p) && n.d > 0),
+    notes: cleanNotes(t.notes),
+    // The notes as they were before Claude's clean-up pass, so it can be undone.
+    original: Array.isArray(t.original) ? cleanNotes(t.original) : null,
   }));
   return out;
 }
