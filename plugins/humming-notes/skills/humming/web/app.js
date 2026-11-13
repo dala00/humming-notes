@@ -621,6 +621,7 @@ async function renderMix() {
   // Bring the loudest point to about -1 dBFS so exports are not quiet.
   let peak = 0;
   for (let c = 0; c < mix.numberOfChannels; c++) for (const v of mix.getChannelData(c)) peak = Math.max(peak, Math.abs(v));
+  window.humming.mixPeak = peak; // what live playback would reach before any normalizing
   if (peak > 0.001) {
     const k = 0.89 / peak;
     for (let c = 0; c < mix.numberOfChannels; c++) {
