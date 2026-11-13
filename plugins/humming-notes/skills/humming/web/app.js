@@ -7,7 +7,7 @@ import {
   effectiveNotes,
   songDuration,
 } from '/lib/shared.mjs';
-import { analyzeTake, measureLatency } from '/lib/analyze.mjs';
+import { analyzeTake, measureLatency, measureClickLag } from '/lib/analyze.mjs';
 
 const $ = (id) => document.getElementById(id);
 const COLORS = ['#5ab0ff', '#ff8a5a', '#7fd88f', '#e07be0', '#ffd24d', '#5ad8d0', '#ff6b8b', '#a59bff'];
@@ -504,6 +504,15 @@ async function record() {
   updateButtons();
 }
 
+// Lay recorder chunks out by their audio-clock time. tb = clock time of sample 0.
+function joinChunks(chunks, sr) {
+  const tb = chunks[0].time;
+  const last = chunks[chunks.length - 1];
+  const all = new Float32Array(Math.round((last.time - tb) * sr) + last.samples.length + 1);
+  for (const c of chunks) all.set(c.samples, Math.min(Math.round((c.time - tb) * sr), all.length - c.samples.length));
+  return { all, tb };
+}
+
 async function stopRecording() {
   const s = session;
   if (!s || s.kind !== 'record') return;
@@ -520,10 +529,7 @@ async function stopRecording() {
   const sr = ctx.sampleRate;
   let result = null;
   if (s.chunks.length) {
-    const tb = s.chunks[0].time;
-    const last = s.chunks[s.chunks.length - 1];
-    const all = new Float32Array(Math.round((last.time - tb) * sr) + last.samples.length + 1);
-    for (const c of s.chunks) all.set(c.samples, Math.min(Math.round((c.time - tb) * sr), all.length - c.samples.length));
+    const { all, tb } = joinChunks(s.chunks, sr);
     // Sample index that corresponds to project time `from`.
     const i0 = Math.round((s.t0 + latency - tb) * sr);
     if (i0 < all.length - sr * 0.1) {
@@ -632,6 +638,82 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
   return id;
 }
 
+// The delay belongs to the headphones, microphone and browser, not to one song,
+// so remember it in this browser and reuse it for new songs.
+const LATENCY_KEY = 'humming.latencyMs';
+function rememberLatency(ms) {
+  try {
+    localStorage.setItem(LATENCY_KEY, String(ms));
+  } catch {
+    /* private window etc.: the value still lives in the project */
+  }
+}
+function recallLatency() {
+  try {
+    const v = localStorage.getItem(LATENCY_KEY);
+    return v == null || !isFinite(Number(v)) ? null : Number(v);
+  } catch {
+    return null;
+  }
+}
+
+// Stand-alone delay measurement: play clicks, the user voices "ah" on them, and the
+// distance between clicks and voice (measured exactly like a real take) becomes the correction.
+const CAL = { beat: 0.6, listen: 4, total: 12 };
+async function calibrateWithClicks() {
+  if (mode !== 'idle') return;
+  mode = 'busy';
+  updateButtons();
+  try {
+    await ensureAudio();
+    await ensureMic();
+  } catch (e) {
+    mode = 'idle';
+    updateButtons();
+    return status(e.message, 'error');
+  }
+  const chunks = [];
+  let finish;
+  const finished = new Promise((r) => (finish = r));
+  mic.node.port.onmessage = (e) => (e.data.done ? finish() : chunks.push(e.data));
+  mic.node.port.postMessage('start');
+  const t0 = ctx.currentTime + 0.5;
+  for (let k = 0; k < CAL.total; k++) click(t0 + k * CAL.beat, k < CAL.listen);
+  status(`遅延を計測します。最初の ${CAL.listen} 回（高い音）は聞くだけ…`);
+  await sleep((0.5 + (CAL.listen - 0.5) * CAL.beat) * 1000);
+  status(`今です。クリックに合わせて短く「あ」と ${CAL.total - CAL.listen} 回、声を出してください。`, 'warn');
+  await sleep(((CAL.total - CAL.listen + 0.5) * CAL.beat + 0.5) * 1000);
+  mic.node.port.postMessage('stop');
+  await Promise.race([finished, sleep(1000)]);
+  mode = 'idle';
+  updateButtons();
+  if (!chunks.length) return status('マイクから音が届きませんでした。マイクの設定を確認してください。', 'error');
+
+  const sr = ctx.sampleRate;
+  const { all, tb } = joinChunks(chunks, sr);
+  // Where each click would sit in this recording if the current correction were exact.
+  const base = t0 + roundTripLatency() - tb;
+  const clicks = Array.from({ length: CAL.total }, (_, k) => base + k * CAL.beat);
+  const r = measureClickLag(all, sr, clicks);
+  if (!r) {
+    return status('うまく測れませんでした。クリックに合わせて、短くはっきり「あ」と 4 回以上声を出してください（手拍子でも測れます）。', 'warn');
+  }
+  const ms = Math.round(r.lag * 1000);
+  const detail = `一致 ${r.matched} 回、ばらつき ±${Math.round(r.spread * 1000)} ms`;
+  const stale = project.tracks.filter((t) => t.take && !t.original).map((t) => t.id);
+  change(() => {
+    project.latencyCalibrated = true;
+    if (Math.abs(ms) < 8) return;
+    project.latencyMs += ms;
+    // Takes recorded with the old setting are off by the same amount.
+    for (const id of stale) trackById(id).offsetMs -= ms;
+  });
+  rememberLatency(project.latencyMs);
+  if (Math.abs(ms) < 8) return status(`遅延を計測しました: ずれは ${ms} ms でほぼありません（${detail}）。このまま録音できます。`, 'ok');
+  const moved = stale.length ? ` 録音済みの ${stale.length} トラックも同じだけずらしました。` : '';
+  status(`遅延を計測しました: 録音が ${Math.abs(ms)} ms ${ms > 0 ? '遅れて' : '早く'}入っていたので補正しました（遅延補正 ${project.latencyMs} ms、${detail}）。${moved}このブラウザでは次の曲にも引き継ぎます。`, 'ok');
+}
+
 // Compare the first two recordings and correct the overdub delay.
 // manual = the user pressed the button (always report); otherwise stay quiet unless something changed.
 function calibrate(manual) {
@@ -663,6 +745,7 @@ function calibrate(manual) {
     for (const id of targets) trackById(id).offsetMs -= ms;
     project.latencyCalibrated = true;
   });
+  rememberLatency(project.latencyMs);
   status(
     `${manual ? '' : prev + ' '}遅延を計測しました: 録音が ${Math.abs(ms)} ms ${ms > 0 ? '遅れて' : '早く'}入っていたので補正しました（${detail}）。今後の録音にも適用されます。違和感があれば Ctrl+Z で戻せます。`,
     'ok'
@@ -783,7 +866,7 @@ function updateButtons() {
   rec.disabled = mode === 'busy';
   $('play').disabled = mode === 'recording' || mode === 'busy';
   $('stop').disabled = mode === 'idle' || mode === 'busy';
-  $('calibrate').disabled = mode === 'recording' || mode === 'busy';
+  $('calibrate').disabled = mode !== 'idle';
   for (const id of ['exportMp3', 'exportWav', 'exportMidi']) $(id).disabled = exporting || mode === 'recording' || mode === 'busy';
 }
 
@@ -1089,7 +1172,8 @@ function bind() {
   $('metronome').addEventListener('change', (e) => change(() => (project.metronome = e.target.checked)));
   $('snapToScale').addEventListener('change', (e) => change(() => (project.snapToScale = e.target.checked)));
   $('draft').addEventListener('change', (e) => change(() => (project.draft = e.target.checked)));
-  $('calibrate').addEventListener('click', () => calibrate(true));
+  $('calibrate').addEventListener('click', calibrateWithClicks);
+  $('latencyMs').addEventListener('change', (e) => rememberLatency(Number(e.target.value) || 0));
   $('nextInstrument').addEventListener('change', (e) => change(() => (project.next.instrument = e.target.value)));
   $('rec').addEventListener('click', () => (mode === 'recording' ? stopRecording() : record()));
   $('play').addEventListener('click', play);
@@ -1128,6 +1212,16 @@ window.humming = {
 
 bind();
 await loadProject();
+// A fresh song starts with the delay measured earlier in this browser.
+{
+  const saved = recallLatency();
+  if (saved != null && !project.latencyCalibrated && !project.tracks.length && project.latencyMs === 0) {
+    project.latencyMs = saved;
+    project.latencyCalibrated = true;
+    scheduleSave();
+    render();
+  }
+}
 setInterval(poll, 1500);
 requestAnimationFrame(frame);
 status('「● 録音」を押して鼻歌をどうぞ。');

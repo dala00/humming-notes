@@ -1,6 +1,6 @@
 // Self-test: synthesize a hummed melody, run the analyzer, check the notes and the MIDI writer.
 // Run: node selftest.mjs
-import { analyzeTake, measureLatency } from './analyze.mjs';
+import { analyzeTake, measureLatency, measureClickLag } from './analyze.mjs';
 import { buildMidi, normalizeProject, effectiveNotes } from './shared.mjs';
 
 const SR = 48000;
@@ -88,6 +88,28 @@ if (!midiOk) failed++;
   const none = measureLatency(120, { onsets: [0.1, 0.9, 2.3], click: false }, { onsets: [0.4, 1.7], click: false });
   console.log(`${none === null ? 'ok  ' : 'FAIL'} too few notes gives no latency estimate`);
   if (none !== null) failed++;
+}
+
+// Click calibration: eight short "ah"s, each 130 ms after its click, with human jitter.
+{
+  const clicks = Array.from({ length: 12 }, (_, k) => 0.5 + k * 0.6);
+  const rec = new Float32Array(Math.round(SR * 9));
+  for (const c of clicks.slice(4)) {
+    const start = Math.round((c + 0.13 + (Math.random() - 0.5) * 0.03) * SR);
+    let ph = 0;
+    for (let i = 0; i < SR * 0.18; i++) {
+      ph += (2 * Math.PI * 180) / SR;
+      rec[start + i] += 0.3 * Math.min(1, i / (SR * 0.01), (SR * 0.18 - i) / (SR * 0.03)) * (Math.sin(ph) + 0.4 * Math.sin(2 * ph));
+    }
+  }
+  for (let i = 0; i < rec.length; i++) rec[i] += 0.004 * (Math.random() * 2 - 1);
+  const r = measureClickLag(rec, SR, clicks);
+  const ok = r && Math.abs(r.lag - 0.13) < 0.02 && r.matched === 8;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} click calibration (${r ? Math.round(r.lag * 1000) : '?'} ms, expected 130)`);
+  if (!ok) failed++;
+  const quiet = measureClickLag(new Float32Array(SR * 9).map(() => 0.002 * (Math.random() * 2 - 1)), SR, clicks);
+  console.log(`${quiet === null ? 'ok  ' : 'FAIL'} click calibration with no voice gives no result`);
+  if (quiet !== null) failed++;
 }
 
 process.exit(failed ? 1 : 0);

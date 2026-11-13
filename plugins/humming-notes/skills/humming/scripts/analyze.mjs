@@ -385,3 +385,50 @@ export function measureLatency(bpm, first, second) {
   if (ok(p)) return { method: 'pair', lag: p.lag, matched: p.matched, spread: p.spread };
   return null;
 }
+
+// ---- click calibration ----
+
+// Start times (seconds) of short sounds such as "ah" or a clap, found from loudness alone.
+export function detectOnsets(samples, sampleRate) {
+  const hop = Math.round(sampleRate * 0.005);
+  const win = hop * 2;
+  const n = Math.floor((samples.length - win) / hop);
+  if (n <= 0) return [];
+  const env = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let e = 0;
+    for (let j = 0; j < win; j++) e += samples[i * hop + j] * samples[i * hop + j];
+    env[i] = Math.sqrt(e / win);
+  }
+  const peak = Array.from(env).sort((a, b) => a - b)[Math.floor(n * 0.98)];
+  if (peak < 0.01) return [];
+  const hi = peak * 0.3;
+  const lo = peak * 0.1;
+  const out = [];
+  let armed = true;
+  let quiet = 0;
+  for (let i = 0; i < n; i++) {
+    if (armed && env[i] > hi) {
+      let j = i; // walk back to where the sound left the floor
+      while (j > 0 && env[j - 1] > lo && i - j < 10) j--;
+      const t = (j * hop) / sampleRate;
+      if (!out.length || t - out[out.length - 1] > 0.15) out.push(t);
+      armed = false;
+      quiet = 0;
+    } else if (!armed) {
+      quiet = env[i] < lo ? quiet + 1 : 0;
+      if (quiet >= 4) armed = true;
+    }
+  }
+  return out;
+}
+
+// The user voiced along with metronome clicks. clickTimes: when each click should have
+// landed in the recording (seconds from its start) if the delay setting were perfect.
+// Returns { lag, matched, spread } (positive lag = the recording comes in late), or null.
+export function measureClickLag(samples, sampleRate, clickTimes) {
+  const onsets = detectOnsets(samples, sampleRate);
+  const r = estimateLag(onsets, clickTimes.map((t) => ({ t, w: 1 })), 0.4);
+  if (!r || r.matched < 4 || r.spread > 0.04) return null;
+  return { lag: r.lag, matched: r.matched, spread: r.spread };
+}

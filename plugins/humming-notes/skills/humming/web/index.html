@@ -18,7 +18,7 @@
   <label title="楽器の音色セット。高音質は初回の読み込みに少し時間がかかります。">音源 <select id="soundfont"></select></label>
   <label title="部屋の響きの量。0 で響きなし。">リバーブ <input id="reverb" type="range" min="0" max="0.6" step="0.05"></label>
   <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
-  <button id="calibrate" title="最初の 2 つの録音を比べて、重ね録りのずれを測って補正します。2 つ目を録音した直後には自動で実行されます。">遅延を自動計測</button>
+  <button id="calibrate" title="クリックが 12 回鳴ります。最初の 4 回は聞くだけ、残りの 8 回に合わせて短く「あ」と声を出すと、録音のずれを測って補正します。機器（ヘッドホンやマイク）を変えたらやり直してください。">遅延を計測</button>
 </header>
 
 <section class="transport">
@@ -54,7 +54,7 @@
     </thead>
     <tbody></tbody>
   </table>
-  <p id="empty" class="hint">まだトラックがありません。「● 録音」を押して鼻歌を歌い、もう一度押すと指定した楽器のノートに変換されます。</p>
+  <p id="empty" class="hint">初めて使う機器では、先に上の「遅延を計測」を一度行うと、録音がメトロノームとずれなくなります。<br>まだトラックがありません。「● 録音」を押して鼻歌を歌い、もう一度押すと指定した楽器のノートに変換されます。</p>
 </section>
 
 <footer class="hint">
