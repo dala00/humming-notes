@@ -19,12 +19,12 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildMidi, defaultProject, normalizeProject, GM_NAMES } from './shared.mjs';
+import { buildMidi, defaultProject, normalizeProject, GM_NAMES, SOUNDFONTS } from './shared.mjs';
 import { trackPitch, analyzeTake, measureLatency } from './analyze.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, '..', 'web');
-const SF_BASE = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM';
+const SF_BASE = 'https://gleitz.github.io/midi-js-soundfonts';
 const SF_CACHE = path.join(os.homedir(), '.cache', 'humming-notes', 'soundfonts');
 const DEFAULT_PORT = 4173;
 
@@ -72,13 +72,15 @@ const NOTE_NAMES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 
 const sfJobs = new Map();
 
 // Download one instrument once and unpack it into <cache>/<name>/<midi>.mp3.
-function ensureSoundfont(name) {
+function ensureSoundfont(set, name) {
+  if (!SOUNDFONTS.some(([n]) => n === set)) return Promise.reject(new Error('unknown sound set'));
   if (!GM_NAMES.includes(name)) return Promise.reject(new Error('unknown instrument'));
-  const dir = path.join(SF_CACHE, name);
+  const dir = path.join(SF_CACHE, set, name);
+  const key = `${set}/${name}`;
   if (fs.existsSync(path.join(dir, '.done'))) return Promise.resolve(dir);
-  if (!sfJobs.has(name)) {
+  if (!sfJobs.has(key)) {
     const job = (async () => {
-      const res = await fetch(`${SF_BASE}/${name}-mp3.js`);
+      const res = await fetch(`${SF_BASE}/${set}/${name}-mp3.js`);
       if (!res.ok) throw new Error(`soundfont download failed: ${res.status}`);
       const text = await res.text();
       await fsp.mkdir(dir, { recursive: true });
@@ -94,10 +96,10 @@ function ensureSoundfont(name) {
       await fsp.writeFile(path.join(dir, '.done'), String(count));
       return dir;
     })();
-    job.catch(() => sfJobs.delete(name));
-    sfJobs.set(name, job);
+    job.catch(() => sfJobs.delete(key));
+    sfJobs.set(key, job);
   }
-  return sfJobs.get(name);
+  return sfJobs.get(key);
 }
 
 // ---------------------------------------------------------------- server
@@ -287,11 +289,11 @@ function serve(args) {
       }
 
       // --- instrument samples (downloaded once, then cached on disk)
-      const sf = p.match(/^\/sf\/([a-z0-9_]+)\/(\d+)\.mp3$/);
+      const sf = p.match(/^\/sf\/([A-Za-z0-9_]+)\/([a-z0-9_]+)\/(\d+)\.mp3$/);
       if (sf && req.method === 'GET') {
         try {
-          const sfDir = await ensureSoundfont(sf[1]);
-          return sendFile(res, path.join(sfDir, `${sf[2]}.mp3`), { 'Cache-Control': 'max-age=86400' });
+          const sfDir = await ensureSoundfont(sf[1], sf[2]);
+          return sendFile(res, path.join(sfDir, `${sf[3]}.mp3`), { 'Cache-Control': 'max-age=86400' });
         } catch (e) {
           return send(res, 502, String(e.message || e));
         }

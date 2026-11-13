@@ -1,4 +1,5 @@
 import {
+  SOUNDFONTS,
   INSTRUMENT_CHOICES,
   instrumentLabel,
   isKnownInstrument,
@@ -12,6 +13,7 @@ const $ = (id) => document.getElementById(id);
 const COLORS = ['#5ab0ff', '#ff8a5a', '#7fd88f', '#e07be0', '#ffd24d', '#5ad8d0', '#ff6b8b', '#a59bff'];
 const EXPORT_RATE = 44100;
 const MASTER_GAIN = 1.6;
+const REVERB_GAIN = 4;
 
 let project = null;
 let baseMtime = null;
@@ -157,20 +159,72 @@ async function ensureAudio() {
   if (ctx.state !== 'running') await ctx.resume();
 }
 
+// A synthetic room: decaying noise that gets duller as it dies away, plus a few early echoes.
+// Seeded, so every playback and every export gets the same room.
+function makeImpulse(actx, seconds) {
+  const rate = actx.sampleRate;
+  const pre = Math.round(rate * 0.012);
+  const len = pre + Math.ceil(rate * seconds);
+  const buf = actx.createBuffer(2, len, rate);
+  for (let c = 0; c < 2; c++) {
+    let seed = 1234567 + c * 7919;
+    const rnd = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * 2 - 1;
+    };
+    const d = buf.getChannelData(c);
+    let lp = 0;
+    for (let i = pre; i < len; i++) {
+      const tt = (i - pre) / rate;
+      const env = Math.pow(10, (-3 * tt) / seconds); // -60 dB at `seconds`
+      const a = Math.min(0.95, 0.25 + (0.6 * tt) / seconds);
+      lp = lp * a + rnd() * (1 - a);
+      d[i] = lp * env * Math.min(1, tt / 0.004);
+    }
+    for (const [ms, g] of c === 0 ? [[19, 0.5], [31, 0.35], [47, 0.25]] : [[23, 0.5], [37, 0.35], [53, 0.25]]) {
+      const i = pre + Math.round((rate * ms) / 1000);
+      if (i < len) d[i] += g * 0.3;
+    }
+  }
+  return buf;
+}
+
+const masterKey = () => `${project.reverb}/${project.reverbTime}`;
+
+// Output chain: tracks -> gain -> (dry + reverb) -> gentle compressor -> speakers.
 function buildMaster(actx) {
   const gain = actx.createGain();
   gain.gain.value = MASTER_GAIN;
   const comp = actx.createDynamicsCompressor();
   comp.threshold.value = -10;
   comp.ratio.value = 6;
-  gain.connect(comp).connect(actx.destination);
+  gain.connect(comp);
+  if (project.reverb > 0) {
+    const conv = actx.createConvolver();
+    conv.buffer = makeImpulse(actx, project.reverbTime);
+    const wet = actx.createGain();
+    wet.gain.value = project.reverb * REVERB_GAIN;
+    gain.connect(conv).connect(wet).connect(comp);
+  }
+  comp.connect(actx.destination);
+  gain.out = comp;
+  gain.key = masterKey();
   return gain;
+}
+
+// Rebuild the live output chain when the reverb settings changed.
+function refreshMaster() {
+  if (master.key === masterKey()) return;
+  master.out.disconnect();
+  master = buildMaster(ctx);
 }
 
 const sampleMidi = (midi) => Math.min(108, Math.max(21, midi));
 
 function loadSample(instrument, midi) {
-  const key = `${instrument}/${midi}`;
+  const key = `${project.soundfont}/${instrument}/${midi}`;
   if (samples.has(key)) return Promise.resolve();
   if (failedInstruments.has(instrument)) {
     samples.set(key, null);
@@ -181,7 +235,7 @@ function loadSample(instrument, midi) {
       key,
       (async () => {
         try {
-          const res = await fetch(`/sf/${instrument}/${midi}.mp3`);
+          const res = await fetch(`/sf/${key}.mp3`);
           if (!res.ok) throw new Error(await res.text());
           samples.set(key, await decodeCtx.decodeAudioData(await res.arrayBuffer()));
         } catch {
@@ -235,8 +289,8 @@ function playNote(actx, dest, instrument, midi, when, dur, vel) {
   const g = actx.createGain();
   g.connect(dest);
   const sm = sampleMidi(midi);
-  const buf = samples.get(`${instrument}/${sm}`);
-  const release = 0.15;
+  const buf = samples.get(`${project.soundfont}/${instrument}/${sm}`);
+  const release = 0.25;
   const hold = Math.max(dur, 0.03);
   let src;
   if (buf) {
@@ -267,7 +321,11 @@ function scheduleProject(actx, dest, t0, from) {
     if (tr.mute) continue;
     const g = actx.createGain();
     g.gain.value = tr.volume;
-    g.connect(dest);
+    if (tr.pan) {
+      const panner = actx.createStereoPanner();
+      panner.pan.value = tr.pan;
+      g.connect(panner).connect(dest);
+    } else g.connect(dest);
     if (tr.instrument === 'voice') {
       const buf = takes.get(tr.id);
       if (!buf) continue;
@@ -352,6 +410,7 @@ async function play() {
     updateButtons();
     return status('再生できるノートがまだありません。');
   }
+  refreshMaster();
   const from = cursor >= dur - 0.05 ? 0 : cursor;
   const t0 = ctx.currentTime + 0.12;
   session = { kind: 'play', t0, from, end: dur, nodes: scheduleProject(ctx, master, t0, from) };
@@ -418,6 +477,7 @@ async function record() {
     updateButtons();
     return status(e.message, 'error');
   }
+  refreshMaster();
   const beatLen = beatSec();
   const countBeats = project.countInBars * project.beatsPerBar;
   const from = cursor;
@@ -615,7 +675,7 @@ async function renderMix() {
   await preload();
   const dur = duration();
   if (dur <= 0) throw new Error('書き出せるノートがありません');
-  const octx = new OfflineAudioContext(2, Math.ceil((dur + 1.5) * EXPORT_RATE), EXPORT_RATE);
+  const octx = new OfflineAudioContext(2, Math.ceil((dur + 1 + (project.reverb > 0 ? project.reverbTime : 0.5)) * EXPORT_RATE), EXPORT_RATE);
   scheduleProject(octx, buildMaster(octx), 0, 0);
   const mix = await octx.startRendering();
   // Bring the loudest point to about -1 dBFS so exports are not quiet.
@@ -747,7 +807,9 @@ function el(tag, props = {}, ...children) {
 
 function render() {
   const active = document.activeElement;
-  for (const id of ['name', 'bpm', 'beatsPerBar', 'countInBars', 'latencyMs']) {
+  if (!$('soundfont').options.length) for (const [n, label] of SOUNDFONTS) $('soundfont').append(el('option', { value: n, textContent: label }));
+  $('soundfont').value = project.soundfont;
+  for (const id of ['name', 'bpm', 'beatsPerBar', 'countInBars', 'latencyMs', 'reverb']) {
     if (active !== $(id)) $(id).value = project[id];
   }
   $('metronome').checked = project.metronome;
@@ -774,6 +836,7 @@ function render() {
     planned.value = tr.planned || '';
     planned.hidden = tr.instrument !== 'voice';
     const vol = el('input', { type: 'range', min: 0, max: 1.5, step: 0.05, value: tr.volume, onchange: (e) => set('volume', Number(e.target.value)) });
+    const pan = el('input', { type: 'range', min: -1, max: 1, step: 0.05, value: tr.pan, title: '左右の位置（中央が 0）', onchange: (e) => set('pan', Number(e.target.value)) });
     const mute = el('input', { type: 'checkbox', checked: tr.mute, onchange: (e) => set('mute', e.target.checked) });
     const transpose = el('input', { type: 'number', step: 1, min: -48, max: 48, value: tr.transpose, onchange: (e) => set('transpose', Number(e.target.value)) });
     const octDown = el('button', { textContent: '−8va', title: '1 オクターブ下げる', onclick: () => set('transpose', tr.transpose - 12) });
@@ -810,6 +873,7 @@ function render() {
       el('td', {}, name),
       el('td', {}, inst, ' ', planned),
       el('td', {}, vol),
+      el('td', {}, pan),
       el('td', {}, mute),
       el('td', {}, transpose, ' ', octDown, ' ', octUp),
       el('td', {}, quant),
@@ -1015,6 +1079,13 @@ function bind() {
   num('beatsPerBar', 'beatsPerBar');
   num('countInBars', 'countInBars');
   num('latencyMs', 'latencyMs');
+  num('reverb', 'reverb');
+  $('soundfont').addEventListener('change', (e) =>
+    change(() => {
+      project.soundfont = e.target.value;
+      failedInstruments.clear();
+    })
+  );
   $('metronome').addEventListener('change', (e) => change(() => (project.metronome = e.target.checked)));
   $('snapToScale').addEventListener('change', (e) => change(() => (project.snapToScale = e.target.checked)));
   $('draft').addEventListener('change', (e) => change(() => (project.draft = e.target.checked)));

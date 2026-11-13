@@ -15,6 +15,8 @@
   <label><input id="metronome" type="checkbox"> メトロノーム</label>
   <label>カウントイン <input id="countInBars" type="number" min="0" max="4" step="1"> 小節</label>
   <label title="録音をノートに変換するとき、調から外れたあいまいな音を調の音に寄せます。"><input id="snapToScale" type="checkbox"> 調に寄せる</label>
+  <label title="楽器の音色セット。高音質は初回の読み込みに少し時間がかかります。">音源 <select id="soundfont"></select></label>
+  <label title="部屋の響きの量。0 で響きなし。">リバーブ <input id="reverb" type="range" min="0" max="0.6" step="0.05"></label>
   <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
   <button id="calibrate" title="最初の 2 つの録音を比べて、重ね録りのずれを測って補正します。2 つ目を録音した直後には自動で実行されます。">遅延を自動計測</button>
 </header>
@@ -48,7 +50,7 @@
 <section>
   <table id="tracks">
     <thead>
-      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th><th></th></tr>
+      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>定位（左 ↔ 右）</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th><th></th></tr>
     </thead>
     <tbody></tbody>
   </table>

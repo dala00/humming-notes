@@ -39,6 +39,13 @@ export const INSTRUMENT_CHOICES = [
   ['voice', '生声（録音そのまま）'],
 ];
 
+// Sample sets the server can fetch (all General MIDI, same instrument names).
+export const SOUNDFONTS = [
+  ['MusyngKite', '高音質（MusyngKite）'],
+  ['FluidR3_GM', '標準（FluidR3）'],
+  ['FatBoy', 'FatBoy'],
+];
+
 export function instrumentLabel(name) {
   const hit = INSTRUMENT_CHOICES.find(([n]) => n === name);
   return hit ? hit[1] : name;
@@ -60,6 +67,9 @@ export function defaultProject(name = 'humming') {
     snapToScale: true,
     draft: false,
     latencyCalibrated: false,
+    soundfont: 'MusyngKite',
+    reverb: 0.2, // 0 = dry, 0.6 = very wet
+    reverbTime: 1.8, // seconds for the tail to die away
     next: { instrument: 'acoustic_grand_piano' },
     tracks: [],
   };
@@ -92,6 +102,9 @@ export function normalizeProject(p) {
   out.snapToScale = out.snapToScale !== false;
   out.draft = !!out.draft;
   out.latencyCalibrated = !!out.latencyCalibrated;
+  if (!SOUNDFONTS.some(([n]) => n === out.soundfont)) out.soundfont = d.soundfont;
+  out.reverb = clamp(out.reverb == null ? d.reverb : Number(out.reverb) || 0, 0, 1);
+  out.reverbTime = clamp(Number(out.reverbTime) || d.reverbTime, 0.3, 6);
   out.latencyMs = Number(out.latencyMs) || 0;
   out.next = { instrument: 'acoustic_grand_piano', ...(out.next || {}) };
   out.tracks = (Array.isArray(out.tracks) ? out.tracks : []).map((t, i) => ({
@@ -103,6 +116,8 @@ export function normalizeProject(p) {
     transpose: Math.round(Number(t.transpose) || 0),
     quantize: Math.round(Number(t.quantize) || 0),
     offsetMs: Number(t.offsetMs) || 0,
+    pan: clamp(Number(t.pan) || 0, -1, 1), // -1 left .. 1 right
+    humanize: clamp(Number(t.humanize) || 0, 0, 1), // small timing and loudness variation
     take: t.take || null,
     // Draft takes play back as the raw voice; this is the instrument they should become.
     planned: t.planned ? String(t.planned) : null,
@@ -115,7 +130,13 @@ export function normalizeProject(p) {
   return out;
 }
 
-// Notes as they should sound: offset, quantize and transpose applied.
+// Repeatable pseudo-random value in -1..1, so playback, export and MIDI all agree.
+function jitter(i) {
+  const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
+  return (x - Math.floor(x)) * 2 - 1;
+}
+
+// Notes as they should sound: offset, quantize, transpose and humanize applied.
 // Each returned note carries `src`, its index in track.notes.
 export function effectiveNotes(project, track) {
   const off = (track.offsetMs || 0) / 1000;
@@ -132,7 +153,13 @@ export function effectiveNotes(project, track) {
     if (end <= 0) return;
     if (t < 0) t = 0;
     const p = clamp(n.p + (track.transpose || 0), 0, 127);
-    out.push({ t, d: end - t, p, v: clamp(n.v == null ? 0.8 : n.v, 0.05, 1), src });
+    let v = n.v == null ? 0.8 : n.v;
+    const h = track.humanize || 0;
+    if (h) {
+      t = Math.max(0, t + jitter(src * 2 + 1) * 0.012 * h);
+      v *= 1 + jitter(src * 2 + 2) * 0.18 * h;
+    }
+    out.push({ t, d: Math.max(0.02, end - t), p, v: clamp(v, 0.05, 1), src });
   });
   out.sort((a, b) => a.t - b.t);
   if (grid) {
@@ -213,6 +240,7 @@ export function buildMidi(project) {
     events.sort((a, b) => a.tick - b.tick || a.order - b.order);
     const nm = utf8(tr.name || tr.instrument);
     let data = [0, 0xff, 0x03, ...vlq(nm.length), ...nm, 0, 0xc0 | channel, program];
+    data = data.concat([0, 0xb0 | channel, 10, clamp(Math.round(64 + (tr.pan || 0) * 63), 0, 127)]);
     let last = 0;
     for (const e of events) {
       data = data.concat(vlq(e.tick - last), e.bytes);

@@ -9,6 +9,8 @@
 5. Claude に「ベースにして」「ハモリを足して」などと頼んで整える
 6. MP3 / WAV / MIDI に書き出す
 
+音源セットの切り替え、リバーブ、パートごとの左右の定位もページで調整でき、書き出しにも反映されます。
+
 基本操作はブラウザ、丁寧な変換と編曲は Claude Code、という分担です。重ね録りの遅延は、2 つ目の録音が終わった時点で最初の 2 つを比べて自動で計測・補正します。ページ内の変換は即時の下書きで、清書前のノートはいつでも戻せます。
 
 ## インストール
@@ -25,7 +27,7 @@
 
 - Node.js 18 以上（追加の npm パッケージは不要）
 - Chrome / Edge などのブラウザとマイク。重ね録りはヘッドホン推奨
-- 楽器の音色は初回だけ [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts)（FluidR3_GM）から取得し、`~/.cache/humming-notes/` にキャッシュします
+- 楽器の音色は初回だけ [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts)（MusyngKite ほか）から取得し、`~/.cache/humming-notes/` にキャッシュします
 
 ## 構成
 
