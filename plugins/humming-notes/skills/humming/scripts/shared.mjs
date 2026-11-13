@@ -58,6 +58,8 @@ export function defaultProject(name = 'humming') {
     countInBars: 1,
     latencyMs: 0,
     snapToScale: true,
+    draft: false,
+    latencyCalibrated: false,
     next: { instrument: 'acoustic_grand_piano' },
     tracks: [],
   };
@@ -88,6 +90,8 @@ export function normalizeProject(p) {
   out.countInBars = clamp(Math.round(Number(out.countInBars) || 0), 0, 4);
   out.metronome = !!out.metronome;
   out.snapToScale = out.snapToScale !== false;
+  out.draft = !!out.draft;
+  out.latencyCalibrated = !!out.latencyCalibrated;
   out.latencyMs = Number(out.latencyMs) || 0;
   out.next = { instrument: 'acoustic_grand_piano', ...(out.next || {}) };
   out.tracks = (Array.isArray(out.tracks) ? out.tracks : []).map((t, i) => ({
@@ -100,6 +104,10 @@ export function normalizeProject(p) {
     quantize: Math.round(Number(t.quantize) || 0),
     offsetMs: Number(t.offsetMs) || 0,
     take: t.take || null,
+    // Draft takes play back as the raw voice; this is the instrument they should become.
+    planned: t.planned ? String(t.planned) : null,
+    // Whether the metronome was on while this take was recorded (null = unknown).
+    click: t.click == null ? null : !!t.click,
     notes: cleanNotes(t.notes),
     // The notes as they were before Claude's clean-up pass, so it can be undone.
     original: Array.isArray(t.original) ? cleanNotes(t.original) : null,

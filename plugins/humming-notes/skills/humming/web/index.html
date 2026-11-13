@@ -16,11 +16,13 @@
   <label>カウントイン <input id="countInBars" type="number" min="0" max="4" step="1"> 小節</label>
   <label title="録音をノートに変換するとき、調から外れたあいまいな音を調の音に寄せます。"><input id="snapToScale" type="checkbox"> 調に寄せる</label>
   <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
+  <button id="calibrate" title="最初の 2 つの録音を比べて、重ね録りのずれを測って補正します。2 つ目を録音した直後には自動で実行されます。">遅延を自動計測</button>
 </header>
 
 <section class="transport">
   <button id="rec" class="rec">● 録音</button>
   <label>次の録音の楽器 <select id="nextInstrument"></select></label>
+  <label title="録音を楽器音にせず、自分の声のまま重ねていきます。変換前の音につられずに歌えます。録り終えたら Claude に「まとめて変換して」と頼むと、全パートを見比べて丁寧に楽器のノートにします。"><input id="draft" type="checkbox"> 下書き録音（生声で重ね、あとでまとめて変換）</label>
   <button id="play">▶ 再生</button>
   <button id="stop">■ 停止</button>
   <button id="undo" title="Ctrl+Z">↶ 元に戻す</button>

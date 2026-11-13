@@ -6,7 +6,7 @@ import {
   effectiveNotes,
   songDuration,
 } from '/lib/shared.mjs';
-import { analyzeTake } from '/lib/analyze.mjs';
+import { analyzeTake, measureLatency } from '/lib/analyze.mjs';
 
 const $ = (id) => document.getElementById(id);
 const COLORS = ['#5ab0ff', '#ff8a5a', '#7fd88f', '#e07be0', '#ffd24d', '#5ad8d0', '#ff6b8b', '#a59bff'];
@@ -523,7 +523,9 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
   await sleep(30);
   const contextNotes = project.tracks.flatMap((tr) => tr.notes.map((n) => ({ p: n.p + tr.transpose, d: n.d })));
   const { notes, detuneCents } = analyzeTake(samplesIn, sampleRate, { snapToScale: project.snapToScale, contextNotes });
-  if (!notes.length && instrument !== 'voice') {
+  // Draft: keep the voice for now and remember which instrument it should become.
+  const draft = project.draft && instrument !== 'voice';
+  if (!notes.length && instrument !== 'voice' && !draft) {
     status('音程を検出できませんでした。マイクに近づいて「ラ」「ナ」などではっきり歌ってみてください。', 'warn');
     return null;
   }
@@ -548,7 +550,9 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
     project.tracks.push({
       id,
       name: `${instrumentLabel(instrument).replace(/（.*/, '')} ${project.tracks.length + 1}`,
-      instrument,
+      instrument: draft ? 'voice' : instrument,
+      planned: draft ? instrument : null,
+      click: project.metronome,
       volume: 0.8,
       mute: false,
       transpose: 0,
@@ -562,8 +566,47 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
     selectedNote = null;
   });
   const tuning = Math.abs(detuneCents) >= 15 ? `（全体に ${detuneCents > 0 ? '+' : ''}${detuneCents} セント寄っていたので補正しました）` : '';
-  status(`${notes.length} 個のノートに変換しました${tuning}。再生して確認し、続けて重ね録りできます。`, 'ok');
+  if (draft) status('下書きとして録音しました（生声で再生されます）。続けて重ね録りし、録り終えたら Claude に「まとめて変換して」と頼んでください。', 'ok');
+  else status(`${notes.length} 個のノートに変換しました${tuning}。再生して確認し、続けて重ね録りできます。`, 'ok');
+  if (!project.latencyCalibrated && project.tracks.filter((t) => t.take).length === 2) calibrate(false);
   return id;
+}
+
+// Compare the first two recordings and correct the overdub delay.
+// manual = the user pressed the button (always report); otherwise stay quiet unless something changed.
+function calibrate(manual) {
+  const pair = project.tracks.filter((t) => t.take).slice(0, 2);
+  if (pair.length < 2) {
+    if (manual) status('遅延の計測には録音が 2 つ必要です。2 つ目を重ね録りすると自動で計測します。', 'warn');
+    return;
+  }
+  const side = (t) => ({
+    // Cleaned-up notes sit on the grid, so measure from the notes as they were sung.
+    onsets: (t.original || t.notes).map((n) => n.t + t.offsetMs / 1000),
+    click: t.click == null ? project.metronome : t.click,
+  });
+  const r = measureLatency(project.bpm, side(pair[0]), side(pair[1]));
+  const prev = $('status').textContent;
+  if (!r) {
+    if (!manual) return;
+    return status('遅延を計測できませんでした（音数が少ないか、2 つの録音のリズムが対応していません）。', 'warn');
+  }
+  const ms = Math.round(r.lag * 1000);
+  const detail = `${r.method === 'grid' ? 'メトロノーム基準' : '1 つ目の録音基準'}、一致 ${r.matched} 音、ばらつき ±${Math.round(r.spread * 1000)} ms`;
+  if (Math.abs(ms) < 10) {
+    change(() => (project.latencyCalibrated = true));
+    return status(`${manual ? '' : prev + ' '}遅延を計測しました: ずれは ${ms} ms でほぼありません（${detail}）。`, 'ok');
+  }
+  const targets = (r.method === 'grid' ? pair : [pair[1]]).filter((t) => !t.original).map((t) => t.id);
+  change(() => {
+    project.latencyMs += ms;
+    for (const id of targets) trackById(id).offsetMs -= ms;
+    project.latencyCalibrated = true;
+  });
+  status(
+    `${manual ? '' : prev + ' '}遅延を計測しました: 録音が ${Math.abs(ms)} ms ${ms > 0 ? '遅れて' : '早く'}入っていたので補正しました（${detail}）。今後の録音にも適用されます。違和感があれば Ctrl+Z で戻せます。`,
+    'ok'
+  );
 }
 
 // ------------------------------------------------------------------ export
@@ -679,6 +722,7 @@ function updateButtons() {
   rec.disabled = mode === 'busy';
   $('play').disabled = mode === 'recording' || mode === 'busy';
   $('stop').disabled = mode === 'idle' || mode === 'busy';
+  $('calibrate').disabled = mode === 'recording' || mode === 'busy';
   for (const id of ['exportMp3', 'exportWav', 'exportMidi']) $(id).disabled = exporting || mode === 'recording' || mode === 'busy';
 }
 
@@ -707,6 +751,7 @@ function render() {
   }
   $('metronome').checked = project.metronome;
   $('snapToScale').checked = project.snapToScale;
+  $('draft').checked = project.draft;
   fillInstrumentSelect($('nextInstrument'), project.next.instrument);
   $('empty').hidden = project.tracks.length > 0;
   $('tracks').hidden = project.tracks.length === 0;
@@ -720,6 +765,13 @@ function render() {
     const inst = el('select', { onchange: (e) => set('instrument', e.target.value) });
     fillInstrumentSelect(inst, tr.instrument);
     if (!tr.take) [...inst.options].forEach((o) => (o.disabled = o.value === 'voice'));
+    // A draft (voice) track also shows the instrument it is meant to become.
+    const planned = el('select', { title: 'まとめて変換するときの楽器', onchange: (e) => set('planned', e.target.value || null) });
+    planned.append(el('option', { value: '', textContent: '変換後: 未定' }));
+    for (const [n, label] of INSTRUMENT_CHOICES) if (n !== 'voice') planned.append(el('option', { value: n, textContent: `変換後: ${label}` }));
+    if (tr.planned && ![...planned.options].some((o) => o.value === tr.planned)) planned.append(el('option', { value: tr.planned, textContent: `変換後: ${tr.planned}` }));
+    planned.value = tr.planned || '';
+    planned.hidden = tr.instrument !== 'voice';
     const vol = el('input', { type: 'range', min: 0, max: 1.5, step: 0.05, value: tr.volume, onchange: (e) => set('volume', Number(e.target.value)) });
     const mute = el('input', { type: 'checkbox', checked: tr.mute, onchange: (e) => set('mute', e.target.checked) });
     const transpose = el('input', { type: 'number', step: 1, min: -48, max: 48, value: tr.transpose, onchange: (e) => set('transpose', Number(e.target.value)) });
@@ -755,7 +807,7 @@ function render() {
       { className: id === selectedTrack ? 'sel' : '' },
       el('td', {}, el('span', { className: 'chip', style: `background:${colorOf(tr)}` })),
       el('td', {}, name),
-      el('td', {}, inst),
+      el('td', {}, inst, ' ', planned),
       el('td', {}, vol),
       el('td', {}, mute),
       el('td', {}, transpose, ' ', octDown, ' ', octUp),
@@ -964,6 +1016,8 @@ function bind() {
   num('latencyMs', 'latencyMs');
   $('metronome').addEventListener('change', (e) => change(() => (project.metronome = e.target.checked)));
   $('snapToScale').addEventListener('change', (e) => change(() => (project.snapToScale = e.target.checked)));
+  $('draft').addEventListener('change', (e) => change(() => (project.draft = e.target.checked)));
+  $('calibrate').addEventListener('click', () => calibrate(true));
   $('nextInstrument').addEventListener('change', (e) => change(() => (project.next.instrument = e.target.value)));
   $('rec').addEventListener('click', () => (mode === 'recording' ? stopRecording() : record()));
   $('play').addEventListener('click', play);

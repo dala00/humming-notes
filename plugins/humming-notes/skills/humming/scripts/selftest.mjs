@@ -1,6 +1,6 @@
 // Self-test: synthesize a hummed melody, run the analyzer, check the notes and the MIDI writer.
 // Run: node selftest.mjs
-import { analyzeTake } from './analyze.mjs';
+import { analyzeTake, measureLatency } from './analyze.mjs';
 import { buildMidi, normalizeProject, effectiveNotes } from './shared.mjs';
 
 const SR = 48000;
@@ -66,5 +66,28 @@ const midi = buildMidi(project);
 const midiOk = eff[0].t === 0 && eff[0].d === 0.25 && eff[1].t === 0.25 && String.fromCharCode(...midi.slice(0, 4)) === 'MThd' && midi[11] === 2;
 console.log(`${midiOk ? 'ok  ' : 'FAIL'} quantize + MIDI header`);
 if (!midiOk) failed++;
+
+// Latency: two takes sung to a 120 bpm click, both recorded 80 ms late with human jitter.
+{
+  const jitter = () => (Math.random() - 0.5) * 0.04;
+  const beats1 = [0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 4.5, 5, 6];
+  const beats2 = [0, 0.25, 0.5, 1, 2, 2.25, 2.5, 3, 4, 5, 5.5, 6];
+  const late = (arr, ms) => arr.map((t) => t + ms / 1000 + jitter());
+  const grid = measureLatency(120, { onsets: late(beats1, 80), click: true }, { onsets: late(beats2, 80), click: true });
+  const gridOk = grid && grid.method === 'grid' && Math.abs(grid.lag - 0.08) < 0.02;
+  console.log(`${gridOk ? 'ok  ' : 'FAIL'} latency against the metronome (${grid ? Math.round(grid.lag * 1000) : '?'} ms, expected 80)`);
+  if (!gridOk) failed++;
+
+  // No click: free rhythm, second take follows the first 120 ms late.
+  const free = [0.13, 0.61, 0.98, 1.72, 2.2, 2.71, 3.4, 3.83, 4.6, 5.12];
+  const pair = measureLatency(120, { onsets: free, click: false }, { onsets: late(free, 120), click: false });
+  const pairOk = pair && pair.method === 'pair' && Math.abs(pair.lag - 0.12) < 0.02;
+  console.log(`${pairOk ? 'ok  ' : 'FAIL'} latency against the first take (${pair ? Math.round(pair.lag * 1000) : '?'} ms, expected 120)`);
+  if (!pairOk) failed++;
+
+  const none = measureLatency(120, { onsets: [0.1, 0.9, 2.3], click: false }, { onsets: [0.4, 1.7], click: false });
+  console.log(`${none === null ? 'ok  ' : 'FAIL'} too few notes gives no latency estimate`);
+  if (none !== null) failed++;
+}
 
 process.exit(failed ? 1 : 0);

@@ -321,3 +321,67 @@ export function analyzeTake(samples, sampleRate, opts = {}) {
     })),
   };
 }
+
+// ---- overdub latency ----
+
+// Reference points on the metronome grid: beats, and (weaker) the eighths between them.
+export function gridRefs(bpm, from, to) {
+  const half = 30 / bpm;
+  const out = [];
+  for (let k = Math.floor(from / half) - 2; k * half <= to + 1; k++) out.push({ t: k * half, w: k % 2 === 0 ? 1 : 0.6 });
+  return out;
+}
+
+// How late (seconds, positive = late) `onsets` are compared with reference points.
+// Returns null when there is too little to go on.
+export function estimateLag(onsets, refs, maxLag = 0.3) {
+  if (onsets.length < 4 || !refs.length) return null;
+  const sigma = 0.025;
+  let best = null;
+  for (let lag = -maxLag; lag <= maxLag + 1e-9; lag += 0.005) {
+    let score = 0;
+    for (const o of onsets) {
+      let m = 0;
+      for (const r of refs) {
+        const d = o - lag - r.t;
+        if (Math.abs(d) < 0.1) m = Math.max(m, r.w * Math.exp((-d * d) / (2 * sigma * sigma)));
+      }
+      score += m;
+    }
+    score *= 1 - (0.15 * Math.abs(lag)) / maxLag; // prefer the smaller correction on near-ties
+    if (!best || score > best.score) best = { lag, score };
+  }
+  const residuals = [];
+  for (const o of onsets) {
+    let nearest = null;
+    for (const r of refs) {
+      const d = o - best.lag - r.t;
+      if (Math.abs(d) <= 0.06 && (nearest == null || Math.abs(d) < Math.abs(nearest))) nearest = d;
+    }
+    if (nearest != null) residuals.push(nearest);
+  }
+  if (residuals.length < 4) return null;
+  const med = median(residuals);
+  const spread = median(residuals.map((x) => Math.abs(x - med)));
+  return { lag: best.lag + med, matched: residuals.length, total: onsets.length, spread };
+}
+
+// Compare the first two takes. Each side: { onsets: [seconds], click: was the metronome on }.
+// With a metronome both takes are measured against the beat; otherwise the second
+// take is measured against the first. Returns { method, lag, matched, spread } or null.
+export function measureLatency(bpm, first, second) {
+  const ok = (r) => r && r.matched >= Math.max(5, r.total * 0.5) && r.spread <= 0.045;
+  if (!first.onsets.length || !second.onsets.length) return null;
+  if (first.click && second.click) {
+    const all = first.onsets.concat(second.onsets);
+    const refs = gridRefs(bpm, Math.min(...all), Math.max(...all));
+    const a = estimateLag(first.onsets, refs);
+    const b = estimateLag(second.onsets, refs);
+    if (ok(a) && ok(b) && Math.abs(a.lag - b.lag) < 0.05) {
+      return { method: 'grid', lag: (a.lag + b.lag) / 2, matched: a.matched + b.matched, spread: Math.max(a.spread, b.spread) };
+    }
+  }
+  const p = estimateLag(second.onsets, first.onsets.map((t) => ({ t, w: 1 })));
+  if (ok(p)) return { method: 'pair', lag: p.lag, matched: p.matched, spread: p.spread };
+  return null;
+}

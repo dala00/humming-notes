@@ -5,8 +5,9 @@
 //   node humming.mjs status [--port 4173]
 //   node humming.mjs export <mp3|wav> [--port 4173]      (rendered by the open page)
 //   node humming.mjs midi   [--project <dir>] [--out file.mid]   (no page needed)
-//   node humming.mjs curve     --track <id|番号|名前> [--project <dir>] [--from sec] [--to sec]
-//   node humming.mjs set-notes --track <id|番号|名前> --notes <file.json> [--project <dir>]
+//   node humming.mjs curve     [--track <id|番号|名前>] [--project <dir>] [--from sec] [--to sec]
+//   node humming.mjs set-notes --track <id|番号|名前> --notes <file.json> [--instrument <name>] [--project <dir>]
+//   node humming.mjs latency   [--apply] [--project <dir>]
 //   node humming.mjs restore   --track <id|番号|名前> [--project <dir>]
 //
 // No npm dependencies. Node 18+.
@@ -19,7 +20,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildMidi, defaultProject, normalizeProject, GM_NAMES } from './shared.mjs';
-import { trackPitch, analyzeTake } from './analyze.mjs';
+import { trackPitch, analyzeTake, measureLatency } from './analyze.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, '..', 'web');
@@ -268,7 +269,19 @@ function serve(args) {
           name: project.name,
           bpm: project.bpm,
           nextInstrument: project.next.instrument,
-          tracks: project.tracks.map((t) => ({ id: t.id, name: t.name, instrument: t.instrument, notes: t.notes.length, mute: t.mute })),
+          draft: project.draft,
+          latencyMs: project.latencyMs,
+          tracks: project.tracks.map((t) => ({
+            id: t.id,
+            name: t.name,
+            instrument: t.instrument,
+            planned: t.planned,
+            notes: t.notes.length,
+            hasTake: !!t.take,
+            cleaned: !!t.original,
+            offsetMs: t.offsetMs,
+            mute: t.mute,
+          })),
           exports: fs.readdirSync(exportsDir),
         });
       }
@@ -405,32 +418,24 @@ function readWav(file) {
 const fmtNotes = (notes) => notes.map((n) => `${n.t.toFixed(2)}:${n.p}/${n.d.toFixed(2)}`).join('  ');
 
 // Print what the singer actually did, compactly enough for Claude to read.
-function cliCurve(args) {
-  const { dir, project } = loadProjectOrFail(args);
-  const track = findTrack(project, args.track);
-  if (!track.take) throw new Error('このトラックには元の録音がありません（Claude が作ったトラックなど）');
+// All times are project time (the track's offsetMs already applied).
+function curveText(dir, project, track, from, to) {
   const { samples, sampleRate } = readWav(path.join(dir, track.take));
   const { hopSec, count, pitch, rms, detune } = trackPitch(samples, sampleRate);
   const auto = analyzeTake(samples, sampleRate, { snapToScale: false });
-  const from = Number(args.from) || 0;
-  const to = args.to != null ? Number(args.to) : Infinity;
+  const off = track.offsetMs / 1000;
+  const shifted = (notes) => notes.map((n) => ({ ...n, t: n.t + off }));
   const STEP = 3; // frames per printed value (30 ms)
   const PER_LINE = 10;
   let maxRms = 0;
   for (let i = 0; i < count; i++) maxRms = Math.max(maxRms, rms[i]);
 
-  const beat = 60 / project.bpm;
   const out = [];
-  out.push(`track ${track.id} "${track.name}" (${track.instrument})  transpose ${track.transpose}  offsetMs ${track.offsetMs}  quantize ${track.quantize}`);
-  out.push(`bpm ${project.bpm}  1拍=${beat.toFixed(3)}s  1小節=${(beat * project.beatsPerBar).toFixed(3)}s (${project.beatsPerBar}拍)  録音の長さ ${(count * hopSec).toFixed(2)}s`);
-  out.push(`全体のチューニングずれ: ${Math.round(detune * 100)} セント（下の音高はこのずれを差し引いた値）`);
-  out.push(`調の推定（機械）: ${auto.key ? auto.key.name : '不明'}`);
-  out.push('');
-  out.push(`現在のノート (開始秒:MIDI番号/長さ秒):\n  ${fmtNotes(track.notes) || '(なし)'}`);
-  if (track.original) out.push(`清書前のノート:\n  ${fmtNotes(track.original)}`);
-  out.push('');
-  out.push('音高曲線: 30ms ごとの「MIDI音高(小数)/音量0-9」。 . は音程なし（息・子音・無音）。行頭は秒。');
-  out.push('小数部は半音内のずれ（例 62.4 は D より 40 セント高い）。フレーズは 150ms 以上の無音で区切り。');
+  const planned = track.planned ? `  予定の楽器 ${track.planned}` : '';
+  out.push(`===== track ${track.id} "${track.name}" (${track.instrument})${planned}  transpose ${track.transpose}  offsetMs ${track.offsetMs}`);
+  out.push(`録音の長さ ${(count * hopSec).toFixed(2)}s  チューニングずれ ${Math.round(detune * 100)} セント（音高は差し引き済み）  調の推定（機械）: ${auto.key ? auto.key.name : '不明'}`);
+  out.push(`現在のノート: ${fmtNotes(shifted(track.notes)) || '(なし)'}`);
+  if (track.original) out.push(`清書前のノート: ${fmtNotes(shifted(track.original))}`);
 
   // Phrases: voiced stretches separated by >= 150 ms without pitch.
   const phrases = [];
@@ -446,11 +451,11 @@ function cliCurve(args) {
     lastVoiced = i;
   }
   if (start >= 0) phrases.push([start, lastVoiced + 1]);
+  if (!phrases.length) out.push('(音程のある音が検出されませんでした)');
 
   for (const [a, b] of phrases) {
-    if (b * hopSec < from || a * hopSec > to) continue;
-    out.push('');
-    out.push(`[${(a * hopSec).toFixed(2)}–${(b * hopSec).toFixed(2)}s]`);
+    if (b * hopSec + off < from || a * hopSec + off > to) continue;
+    out.push(`[${(a * hopSec + off).toFixed(2)}–${(b * hopSec + off).toFixed(2)}s]`);
     let line = [];
     let lineStart = a;
     for (let i = a; i < b; i += STEP) {
@@ -462,14 +467,32 @@ function cliCurve(args) {
       }
       vals.sort((x, y) => x - y);
       const level = Math.min(9, Math.round((lv / (maxRms || 1)) * 9));
-      line.push(vals.length ? `${vals[vals.length >> 1].toFixed(1)}/${level}` : `  .  /${level}`.slice(1));
+      line.push(vals.length ? `${vals[vals.length >> 1].toFixed(1)}/${level}` : ` .  /${level}`);
       if (line.length === PER_LINE || i + STEP >= b) {
-        out.push(`  ${(lineStart * hopSec).toFixed(2).padStart(6)}  ${line.join(' ')}`);
+        out.push(`  ${(lineStart * hopSec + off).toFixed(2).padStart(6)}  ${line.join(' ')}`);
         line = [];
         lineStart = i + STEP;
       }
     }
   }
+  return out.join('\n');
+}
+
+function cliCurve(args) {
+  const { dir, project } = loadProjectOrFail(args);
+  const withTake = project.tracks.filter((t) => t.take);
+  const tracks = typeof args.track === 'string' ? [findTrack(project, args.track)] : withTake;
+  if (!tracks.length) throw new Error('録音のあるトラックがありません');
+  for (const t of tracks) if (!t.take) throw new Error(`"${t.name}" には元の録音がありません（Claude が作ったトラックなど）`);
+  const from = Number(args.from) || 0;
+  const to = args.to != null ? Number(args.to) : Infinity;
+  const beat = 60 / project.bpm;
+  const out = [];
+  out.push(`bpm ${project.bpm}  1拍=${beat.toFixed(3)}s  1小節=${(beat * project.beatsPerBar).toFixed(3)}s (${project.beatsPerBar}拍)  latencyMs ${project.latencyMs}`);
+  out.push('時刻はすべて曲の時刻（秒、各トラックの offsetMs 適用後）。set-notes に渡すノートも同じ時刻で書く。');
+  out.push('音高曲線: 30ms ごとの「MIDI音高(小数)/音量0-9」。 . は音程なし（息・子音・無音）。行頭は秒。');
+  out.push('小数部は半音内のずれ（例 62.4 は D より 40 セント高い）。[ ] は 150ms 以上の無音で区切ったフレーズ。');
+  for (const t of tracks) out.push('', curveText(dir, project, t, from, to));
   console.log(out.join('\n'));
 }
 
@@ -478,18 +501,31 @@ function cliSetNotes(args) {
   const track = findTrack(project, args.track);
   if (typeof args.notes !== 'string') throw new Error('--notes <file.json> を指定してください（[{t,d,p,v?}, ...] の配列）');
   const parsed = JSON.parse(fs.readFileSync(path.resolve(args.notes), 'utf8'));
-  const notes = Array.isArray(parsed) ? parsed : parsed.notes;
-  if (!Array.isArray(notes) || !notes.length) throw new Error('ノートの配列が空です');
-  for (const n of notes) {
+  const input = Array.isArray(parsed) ? parsed : parsed.notes;
+  if (!Array.isArray(input) || !input.length) throw new Error('ノートの配列が空です');
+  for (const n of input) {
     if (![n.t, n.d, n.p].every((x) => typeof x === 'number' && isFinite(x)) || n.d <= 0 || n.t < 0 || n.p < 0 || n.p > 127) {
       throw new Error(`不正なノート: ${JSON.stringify(n)}`);
     }
   }
+  if (typeof args.instrument === 'string' && args.instrument !== 'voice' && !GM_NAMES.includes(args.instrument)) {
+    throw new Error(`楽器名 "${args.instrument}" は一覧にありません（scripts/shared.mjs の GM_NAMES を参照）`);
+  }
+  // Input is in project time; notes are stored relative to the take.
+  const off = track.offsetMs / 1000;
+  const notes = input.map((n) => ({ ...n, t: Math.max(0, Math.round((n.t - off) * 1000) / 1000) }));
   // Keep the pre-clean-up notes once, so the page can flip back to them.
   if (!track.original) track.original = track.notes;
   track.notes = notes;
+  track.quantize = 0;
+  let inst = '';
+  if (typeof args.instrument === 'string') {
+    track.instrument = args.instrument;
+    track.planned = null;
+    inst = `、楽器を ${args.instrument} に`;
+  }
   writeProject(dir, project);
-  console.log(`${track.name}: ${track.original.length} ノート → ${notes.length} ノートに置き換えました（清書前はページの「清書前と入れ替え」か restore で戻せます）`);
+  console.log(`${track.name}: ${track.original.length} ノート → ${notes.length} ノートに置き換えました${inst}（清書前はページの「清書前と入れ替え」か restore で戻せます）`);
 }
 
 function cliRestore(args) {
@@ -502,6 +538,34 @@ function cliRestore(args) {
   console.log(`${track.name}: 清書前の ${track.notes.length} ノートに戻しました`);
 }
 
+// Compare the first two recordings and report how far the overdub is off.
+function cliLatency(args) {
+  const { dir, project } = loadProjectOrFail(args);
+  const takes = project.tracks.filter((t) => t.take).slice(0, 2);
+  if (takes.length < 2) throw new Error('録音が 2 つ以上必要です');
+  const sides = takes.map((t) => {
+    const { samples, sampleRate } = readWav(path.join(dir, t.take));
+    const { notes } = analyzeTake(samples, sampleRate, { snapToScale: false });
+    return { onsets: notes.map((n) => n.t + t.offsetMs / 1000), click: t.click ?? project.metronome };
+  });
+  const r = measureLatency(project.bpm, sides[0], sides[1]);
+  if (!r) {
+    console.log('計測できませんでした（音数が少ない、または 2 つの録音のリズムが対応していません）。');
+    return;
+  }
+  const ms = Math.round(r.lag * 1000);
+  const how = r.method === 'grid' ? 'メトロノームの拍に対する両方の録音のずれ' : `"${takes[0].name}" に対する "${takes[1].name}" のずれ`;
+  console.log(`残っているずれ: ${ms >= 0 ? '+' : ''}${ms} ms（${how}、一致 ${r.matched} 音、ばらつき ±${Math.round(r.spread * 1000)} ms）。プラスは録音が遅れている。`);
+  if (!args.apply) return console.log('反映するには --apply を付けます（latencyMs に加算し、清書前のトラックの offsetMs から引きます）。');
+  if (Math.abs(ms) < 10) return console.log('ずれは 10 ms 未満なので変更しません。');
+  project.latencyMs += ms;
+  const targets = r.method === 'grid' ? takes : [takes[1]];
+  for (const t of targets) if (!t.original) t.offsetMs -= ms;
+  project.latencyCalibrated = true;
+  writeProject(dir, project);
+  console.log(`反映しました: latencyMs = ${project.latencyMs}、ずらしたトラック: ${targets.filter((t) => !t.original).map((t) => t.name).join(', ') || 'なし（清書済みのため）'}`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._[0] || 'serve';
@@ -511,8 +575,9 @@ async function main() {
   if (cmd === 'curve') return cliCurve(args);
   if (cmd === 'set-notes') return cliSetNotes(args);
   if (cmd === 'restore') return cliRestore(args);
+  if (cmd === 'latency') return cliLatency(args);
   if (cmd === 'status') return console.log(JSON.stringify(await api(Number(args.port) || DEFAULT_PORT, '/api/status'), null, 2));
-  throw new Error(`unknown command: ${cmd} (serve | status | export | midi | curve | set-notes | restore)`);
+  throw new Error(`unknown command: ${cmd} (serve | status | export | midi | curve | set-notes | restore | latency)`);
 }
 
 main().catch((e) => {
