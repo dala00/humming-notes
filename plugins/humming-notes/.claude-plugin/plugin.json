@@ -3,6 +3,11 @@
   "description": "Record humming in the browser, turn it into instrument notes, overdub parts and export MP3 / WAV / MIDI",
   "version": "0.1.0",
   "author": {
-    "name": "dala00"
-  }
+    "name": "dala00",
+    "url": "https://github.com/dala00"
+  },
+  "homepage": "https://github.com/dala00/humming-notes",
+  "repository": "https://github.com/dala00/humming-notes",
+  "license": "MIT",
+  "keywords": ["music", "humming", "midi", "audio", "recording"]
 }

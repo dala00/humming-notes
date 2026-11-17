@@ -18,11 +18,11 @@ The browser handles the hands-on work, Claude Code handles careful conversion an
 ## Install
 
 ```
-/plugin marketplace add <path to this repository>
+/plugin marketplace add dala00/humming-notes
 /plugin install humming-notes@humming-notes
 ```
 
-To just try it, `claude --plugin-dir plugins/humming-notes` works too.
+To try it from a clone of this repository without installing, `claude --plugin-dir plugins/humming-notes` works too.
 Then tell Claude Code "I want to make a song by humming" or run `/humming-notes:humming`.
 
 ## Requirements
@@ -61,3 +61,14 @@ node plugins/humming-notes/skills/humming/scripts/humming.mjs serve --open
 Songs are stored in `humming-projects/<name>/` under the current folder (`project.json`, the original recordings in `takes/`, exports in `exports/`). Changes are saved automatically.
 
 Songs are managed at the top of the page: the "Song" list switches between them, "New song" creates an empty one, "Duplicate" copies the current song with its recordings, and "Rename" renames it together with its folder. The server opens the song that was open last. The page has no delete; remove the folder when a song is no longer needed.
+
+## Privacy
+
+Everything runs on your machine. The server listens on `127.0.0.1` only, and recordings and songs stay in the `humming-projects/` folder. The only network access by the tool itself is downloading instrument samples from the soundfont site above. What Claude Code reads while helping (note data, pitch curves printed by the CLI) is handled like any other Claude Code conversation.
+
+## License and credits
+
+The code in this repository is released under the [MIT License](LICENSE).
+
+- `web/vendor/lame.min.js` is [lamejs](https://github.com/zhuker/lamejs) 1.2.1, an MP3 encoder licensed under the LGPL. It is bundled unmodified.
+- Instrument samples come from [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) and are downloaded at run time, not included here. Each set has its own license: FluidR3 is CC BY 3.0, MusyngKite and FatBoy are CC BY-SA 3.0. Check those terms before publishing music made with them.

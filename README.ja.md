@@ -18,11 +18,11 @@
 ## インストール
 
 ```
-/plugin marketplace add <このリポジトリのパス>
+/plugin marketplace add dala00/humming-notes
 /plugin install humming-notes@humming-notes
 ```
 
-試すだけなら `claude --plugin-dir plugins/humming-notes` でも読み込めます。
+インストールせずに試すなら、このリポジトリをクローンして `claude --plugin-dir plugins/humming-notes` でも読み込めます。
 その後 Claude Code で「鼻歌で曲を作りたい」と言うか `/humming-notes:humming` を実行します。
 
 ## 必要なもの
@@ -61,3 +61,14 @@ node plugins/humming-notes/skills/humming/scripts/humming.mjs serve --open
 曲のデータはカレントフォルダの `humming-projects/<名前>/` に保存されます（`project.json`、元の録音 `takes/`、書き出し `exports/`）。変更は自動で保存されます。
 
 曲はページの上部で管理できます。「曲」の一覧で切り替え、「新しい曲」で空の曲を作成、「複製」で録音ごとコピー、「名前を変更」でフォルダ名ごと改名します。起動時は最後に開いた曲が開きます。曲の削除はページにはないので、不要になったらフォルダを消してください。
+
+## プライバシー
+
+すべて手元のマシンで動きます。サーバーは `127.0.0.1` だけで待ち受け、録音と曲のデータは `humming-projects/` フォルダに残ります。ツール自体が行う通信は、上記の音源サイトからの楽器音色のダウンロードだけです。Claude Code が手伝うときに読む内容（ノートのデータ、CLI が出力する音高曲線）は、ほかの Claude Code の会話と同じ扱いになります。
+
+## ライセンスとクレジット
+
+このリポジトリのコードは [MIT ライセンス](LICENSE) で公開しています。
+
+- `web/vendor/lame.min.js` は MP3 エンコーダーの [lamejs](https://github.com/zhuker/lamejs) 1.2.1 で、LGPL です。無改変で同梱しています。
+- 楽器の音色は [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) から実行時に取得するもので、このリポジトリには含まれません。音源セットごとにライセンスがあります。FluidR3 は CC BY 3.0、MusyngKite と FatBoy は CC BY-SA 3.0 です。これらの音源で作った曲を公開する前に、その条件を確認してください。
