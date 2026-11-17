@@ -4,6 +4,8 @@ English | [日本語](README.ja.md)
 
 A Claude Code skill (plugin) for making music by humming.
 
+![The recording page: a piano roll with three overdubbed parts and a track list](docs/screenshot.png)
+
 1. Record yourself humming on a page in the browser
 2. The take is converted to notes (MIDI-like) for the instrument you chose
 3. Overdub the next part while the earlier ones play
@@ -70,5 +72,5 @@ Everything runs on your machine. The server listens on `127.0.0.1` only, and rec
 
 The code in this repository is released under the [MIT License](LICENSE).
 
-- `web/vendor/lame.min.js` is [lamejs](https://github.com/zhuker/lamejs) 1.2.1, an MP3 encoder licensed under the LGPL. It is bundled unmodified.
+- `web/vendor/lame.min.js` is [lamejs](https://github.com/zhuker/lamejs) 1.2.1, a JavaScript port of the [LAME](https://lame.sourceforge.net) MP3 encoder, licensed under the LGPL. It is bundled unmodified, with its license texts in the same folder.
 - Instrument samples come from [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) and are downloaded at run time, not included here. Each set has its own license: FluidR3 is CC BY 3.0, MusyngKite and FatBoy are CC BY-SA 3.0. Check those terms before publishing music made with them.

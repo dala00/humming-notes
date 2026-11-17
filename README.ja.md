@@ -4,6 +4,8 @@
 
 鼻歌から曲を作る Claude Code スキル（プラグイン）です。
 
+![録音ページ。3 つのパートを重ねたピアノロールとトラック一覧（英語表示）](docs/screenshot.png)
+
 1. ブラウザのページで鼻歌を録音する
 2. 指定した楽器のノート（MIDI 相当）に変換される
 3. それを鳴らしながら別のパートを重ね録りする
@@ -70,5 +72,5 @@ node plugins/humming-notes/skills/humming/scripts/humming.mjs serve --open
 
 このリポジトリのコードは [MIT ライセンス](LICENSE) で公開しています。
 
-- `web/vendor/lame.min.js` は MP3 エンコーダーの [lamejs](https://github.com/zhuker/lamejs) 1.2.1 で、LGPL です。無改変で同梱しています。
+- `web/vendor/lame.min.js` は MP3 エンコーダーの [lamejs](https://github.com/zhuker/lamejs) 1.2.1（[LAME](https://lame.sourceforge.net) の JavaScript 移植）で、LGPL です。無改変で同梱し、ライセンス文書を同じフォルダに置いています。
 - 楽器の音色は [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) から実行時に取得するもので、このリポジトリには含まれません。音源セットごとにライセンスがあります。FluidR3 は CC BY 3.0、MusyngKite と FatBoy は CC BY-SA 3.0 です。これらの音源で作った曲を公開する前に、その条件を確認してください。
