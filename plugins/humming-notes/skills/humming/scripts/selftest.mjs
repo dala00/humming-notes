@@ -2,6 +2,7 @@
 // Run: node selftest.mjs
 import { analyzeTake, measureLatency, measureClickLag } from './analyze.mjs';
 import { buildMidi, normalizeProject, effectiveNotes } from './shared.mjs';
+import { MESSAGES, LANGS, pickLang, translator } from './i18n.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -115,6 +116,45 @@ if (!midiOk) failed++;
   const quiet = measureClickLag(new Float32Array(SR * 9).map(() => 0.002 * (Math.random() * 2 - 1)), SR, clicks);
   console.log(`${quiet === null ? 'ok  ' : 'FAIL'} click calibration with no voice gives no result`);
   if (quiet !== null) failed++;
+}
+
+// Translations: every language has the same keys and placeholders as English,
+// and every key the page or the CLI asks for exists.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const expect = (ok, name, detail = '') => {
+    console.log(`${ok ? 'ok  ' : 'FAIL'} i18n: ${name}${ok || !detail ? '' : ` (${detail})`}`);
+    if (!ok) failed++;
+  };
+  const holes = (s) => (s.match(/\{\w+\}/g) || []).sort().join();
+  for (const [lang] of LANGS) {
+    if (lang === 'en') continue;
+    const missing = Object.keys(MESSAGES.en).filter((k) => !(k in MESSAGES[lang]));
+    const extra = Object.keys(MESSAGES[lang]).filter((k) => !(k in MESSAGES.en));
+    const mismatched = Object.keys(MESSAGES[lang]).filter((k) => k in MESSAGES.en && holes(MESSAGES[lang][k]) !== holes(MESSAGES.en[k]));
+    expect(!missing.length && !extra.length, `${lang} has the same keys as en`, [...missing, ...extra].join(', '));
+    expect(!mismatched.length, `${lang} uses the same placeholders as en`, mismatched.join(', '));
+  }
+  const used = new Set();
+  const app = fs.readFileSync(path.join(here, '..', 'web', 'app.js'), 'utf8');
+  const cli = fs.readFileSync(path.join(here, 'humming.mjs'), 'utf8');
+  const html = fs.readFileSync(path.join(here, '..', 'web', 'index.html'), 'utf8');
+  for (const m of (app + cli).matchAll(/\bt\(\s*'([\w.]+)'/g)) used.add(m[1]);
+  // Keys chosen by a condition: t(late ? 'cal.fixedLate' : 'cal.fixedEarly', ...)
+  for (const m of (app + cli).matchAll(/\? '([a-z]\w*\.\w+)' : '([a-z]\w*\.\w+)'/g)) used.add(m[1]).add(m[2]);
+  for (const m of html.matchAll(/data-i18n(?:-title)?="([\w.]+)"/g)) used.add(m[1]);
+  for (const m of cli.matchAll(/code: '(\w+)'/g)) used.add(`err.${m[1]}`);
+  const unknown = [...used].filter((k) => !(k in MESSAGES.en));
+  expect(used.size > 100 && !unknown.length, 'every key in the page and the CLI is defined', unknown.join(', '));
+  const unused = Object.keys(MESSAGES.en).filter((k) => !used.has(k) && !/^(inst|sf|quant)\./.test(k));
+  expect(!unused.length, 'no unused keys', unused.join(', '));
+  expect(/[ぁ-んァ-ヶ一-龠]/.test(app + cli + html) === false, 'no Japanese text outside i18n.mjs');
+  const ja = translator('ja');
+  expect(
+    pickLang(null, 'ja-JP') === 'ja' && pickLang('fr', 'en-US', 'ja') === 'en' && pickLang() === 'en' && translator('fr').lang === 'en',
+    'language choice falls back to English'
+  );
+  expect(ja('err.song_exists', { folder: 'x' }).includes('「x」') && translator('en')('rec.done', { count: 3, tuning: '' }).includes('3 notes'), 'placeholders are filled');
 }
 
 // Song management: a real server in a scratch folder, driven the way the page drives it.

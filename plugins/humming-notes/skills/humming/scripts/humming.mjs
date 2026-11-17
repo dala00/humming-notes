@@ -7,10 +7,12 @@
 //   node humming.mjs status [--port 4173]
 //   node humming.mjs export <mp3|wav> [--port 4173]      (rendered by the open page)
 //   node humming.mjs midi   [--project <dir>] [--out file.mid]   (no page needed)
-//   node humming.mjs curve     [--track <id|番号|名前>] [--project <dir>] [--from sec] [--to sec]
-//   node humming.mjs set-notes --track <id|番号|名前> --notes <file.json> [--instrument <name>] [--project <dir>]
+//   node humming.mjs curve     [--track <id|number|name>] [--project <dir>] [--from sec] [--to sec]
+//   node humming.mjs set-notes --track <id|number|name> --notes <file.json> [--instrument <name>] [--project <dir>]
 //   node humming.mjs latency   [--apply] [--project <dir>]
-//   node humming.mjs restore   --track <id|番号|名前> [--project <dir>]
+//   node humming.mjs restore   --track <id|number|name> [--project <dir>]
+//
+// Messages are English, or Japanese on a Japanese system. HUMMING_LANG=en|ja or --lang en|ja overrides.
 //
 // No npm dependencies. Node 18+.
 
@@ -23,6 +25,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { buildMidi, defaultProject, normalizeProject, GM_NAMES, SOUNDFONTS } from './shared.mjs';
 import { trackPitch, analyzeTake, measureLatency } from './analyze.mjs';
+import { pickLang, translator } from './i18n.mjs';
+
+let t = translator(pickLang(process.env.HUMMING_LANG, Intl.DateTimeFormat().resolvedOptions().locale));
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, '..', 'web');
@@ -244,9 +249,9 @@ function serve(args) {
         try {
           project = readProject(dir);
         } catch (e) {
-          error = `project.json を読めません: ${e.message}`;
+          error = { code: 'project_unreadable', error: `Cannot read project.json: ${e.message}`, detail: e.message };
         }
-        return send(res, 200, { project, mtime: mtime(), error, dir });
+        return send(res, 200, { project, mtime: mtime(), ...error, dir });
       }
       if (p === '/api/project' && req.method === 'PUT') {
         const body = JSON.parse((await readBody(req)).toString('utf8'));
@@ -274,16 +279,16 @@ function serve(args) {
         const body = JSON.parse((await readBody(req)).toString('utf8'));
         if (body.action === 'open') {
           const song = listSongs(root).find((s) => s.folder === body.folder);
-          if (!song) return send(res, 404, { error: 'その曲が見つかりません。' });
+          if (!song) return send(res, 404, { code: 'song_not_found', error: 'That song was not found.' });
           openSong(path.join(root, song.folder));
         } else if (['new', 'copy', 'rename'].includes(body.action)) {
           const name = String(body.name || '').trim();
           const folder = folderName(name);
-          if (!folder) return send(res, 400, { error: '曲の名前を入力してください。' });
+          if (!folder) return send(res, 400, { code: 'name_required', error: 'Enter a name for the song.' });
           const target = path.join(root, folder);
           const inPlace = target === dir; // rename where only the title differs from the folder
           if (fs.existsSync(target) && !(body.action === 'rename' && inPlace)) {
-            return send(res, 409, { error: `「${folder}」という曲はすでにあります。別の名前にしてください。` });
+            return send(res, 409, { code: 'song_exists', error: `There is already a song called "${folder}".`, folder });
           }
           if (body.action === 'new') {
             openSong(target, name);
@@ -394,6 +399,7 @@ function serve(args) {
       if (req.method === 'GET') {
         if (p === '/lib/shared.mjs') return sendFile(res, path.join(HERE, 'shared.mjs'));
         if (p === '/lib/analyze.mjs') return sendFile(res, path.join(HERE, 'analyze.mjs'));
+        if (p === '/lib/i18n.mjs') return sendFile(res, path.join(HERE, 'i18n.mjs'));
         const rel = p === '/' ? 'index.html' : p.slice(1);
         const file = path.resolve(WEB_DIR, rel);
         if (!file.startsWith(path.resolve(WEB_DIR) + path.sep)) return send(res, 403, 'forbidden');
@@ -407,7 +413,7 @@ function serve(args) {
 
   server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') {
-      console.error(`ポート ${port} は使用中です。すでに起動中なら http://localhost:${port}/ を開いてください。別ポートは --port で指定できます。`);
+      console.error(t('cli.portInUse', { port }));
     } else console.error(e.message);
     process.exit(1);
   });
@@ -426,7 +432,7 @@ async function api(port, pathname, init) {
   try {
     res = await fetch(`http://127.0.0.1:${port}${pathname}`, init);
   } catch {
-    throw new Error(`サーバーに接続できません (port ${port})。先に serve を起動してください。`);
+    throw new Error(t('cli.noServer', { port }));
   }
   if (!res.ok) throw new Error(`${pathname}: ${res.status} ${await res.text()}`);
   return res.json();
@@ -434,28 +440,28 @@ async function api(port, pathname, init) {
 
 async function cliExport(args) {
   const format = args._[1];
-  if (format !== 'mp3' && format !== 'wav') throw new Error('使い方: humming.mjs export <mp3|wav>');
+  if (format !== 'mp3' && format !== 'wav') throw new Error(t('cli.exportUsage'));
   const port = Number(args.port) || DEFAULT_PORT;
   const cmd = await api(port, '/api/command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: 'export', format }),
   });
-  if (!cmd.pageOpen) console.error('ページが開かれていないようです。ブラウザでページを開くと書き出しが始まります…');
+  if (!cmd.pageOpen) console.error(t('cli.pageClosed'));
   const deadline = Date.now() + (Number(args.timeout) || 180) * 1000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
     const s = await api(port, `/api/command/${cmd.id}`);
     if (s.state === 'done') return console.log(s.file);
-    if (s.state === 'error') throw new Error(`書き出し失敗: ${s.error}`);
+    if (s.state === 'error') throw new Error(t('cli.exportFailed', { detail: s.error }));
   }
-  throw new Error('タイムアウト: ページが応答しません。ブラウザのタブが開いているか確認してください（ページ上の書き出しボタンでも同じファイルが作れます）。');
+  throw new Error(t('cli.exportTimeout'));
 }
 
 function cliMidi(args) {
   const dir = projectDir(args);
   const project = readProject(dir);
-  if (!project) throw new Error(`${path.join(dir, 'project.json')} がありません`);
+  if (!project) throw new Error(t('cli.noProject', { file: path.join(dir, 'project.json') }));
   const out = typeof args.out === 'string' ? path.resolve(args.out) : path.join(dir, 'exports', `${safeName(project.name)}-${stamp()}.mid`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, buildMidi(project));
@@ -465,19 +471,19 @@ function cliMidi(args) {
 // ---------------------------------------------------------------- clean-up support
 
 function findTrack(project, sel) {
-  if (typeof sel !== 'string') throw new Error('--track <id|番号|名前> を指定してください');
-  const byId = project.tracks.find((t) => t.id === sel);
+  if (typeof sel !== 'string') throw new Error(t('cli.trackRequired'));
+  const byId = project.tracks.find((tr) => tr.id === sel);
   const byIndex = /^\d+$/.test(sel) ? project.tracks[Number(sel) - 1] : null;
-  const byName = project.tracks.find((t) => t.name === sel);
+  const byName = project.tracks.find((tr) => tr.name === sel);
   const track = byId || byIndex || byName;
-  if (!track) throw new Error(`トラック "${sel}" がありません: ${project.tracks.map((t, i) => `${i + 1}=${t.id}(${t.name})`).join(', ')}`);
+  if (!track) throw new Error(t('cli.noTrack', { sel, list: project.tracks.map((tr, i) => `${i + 1}=${tr.id}(${tr.name})`).join(', ') }));
   return track;
 }
 
 function loadProjectOrFail(args) {
   const dir = projectDir(args);
   const project = readProject(dir);
-  if (!project) throw new Error(`${path.join(dir, 'project.json')} がありません`);
+  if (!project) throw new Error(t('cli.noProject', { file: path.join(dir, 'project.json') }));
   return { dir, project };
 }
 
@@ -489,7 +495,7 @@ function writeProject(dir, project) {
 
 function readWav(file) {
   const buf = fs.readFileSync(file);
-  if (buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WAVE') throw new Error('WAV ファイルではありません');
+  if (buf.toString('latin1', 0, 4) !== 'RIFF' || buf.toString('latin1', 8, 12) !== 'WAVE') throw new Error(t('cli.notWav'));
   let pos = 12;
   let fmt = null;
   while (pos + 8 <= buf.length) {
@@ -497,7 +503,7 @@ function readWav(file) {
     const size = buf.readUInt32LE(pos + 4);
     if (id === 'fmt ') fmt = { channels: buf.readUInt16LE(pos + 10), sampleRate: buf.readUInt32LE(pos + 12), bits: buf.readUInt16LE(pos + 22) };
     if (id === 'data') {
-      if (!fmt || fmt.bits !== 16) throw new Error('16bit PCM の WAV だけ読めます');
+      if (!fmt || fmt.bits !== 16) throw new Error(t('cli.wav16'));
       const n = Math.floor(Math.min(size, buf.length - pos - 8) / 2 / fmt.channels);
       const samples = new Float32Array(n);
       for (let i = 0; i < n; i++) samples[i] = buf.readInt16LE(pos + 8 + i * 2 * fmt.channels) / 32768;
@@ -505,7 +511,7 @@ function readWav(file) {
     }
     pos += 8 + size + (size % 2);
   }
-  throw new Error('WAV にデータがありません');
+  throw new Error(t('cli.wavEmpty'));
 }
 
 const fmtNotes = (notes) => notes.map((n) => `${n.t.toFixed(2)}:${n.p}/${n.d.toFixed(2)}`).join('  ');
@@ -524,11 +530,11 @@ function curveText(dir, project, track, from, to) {
   for (let i = 0; i < count; i++) maxRms = Math.max(maxRms, rms[i]);
 
   const out = [];
-  const planned = track.planned ? `  予定の楽器 ${track.planned}` : '';
+  const planned = track.planned ? t('curve.planned', { name: track.planned }) : '';
   out.push(`===== track ${track.id} "${track.name}" (${track.instrument})${planned}  transpose ${track.transpose}  offsetMs ${track.offsetMs}`);
-  out.push(`録音の長さ ${(count * hopSec).toFixed(2)}s  チューニングずれ ${Math.round(detune * 100)} セント（音高は差し引き済み）  調の推定（機械）: ${auto.key ? auto.key.name : '不明'}`);
-  out.push(`現在のノート: ${fmtNotes(shifted(track.notes)) || '(なし)'}`);
-  if (track.original) out.push(`清書前のノート: ${fmtNotes(shifted(track.original))}`);
+  out.push(t('curve.take', { sec: (count * hopSec).toFixed(2), cents: Math.round(detune * 100), key: auto.key ? auto.key.name : t('cli.unknown') }));
+  out.push(t('curve.notes', { notes: fmtNotes(shifted(track.notes)) || t('cli.none') }));
+  if (track.original) out.push(t('curve.original', { notes: fmtNotes(shifted(track.original)) }));
 
   // Phrases: voiced stretches separated by >= 150 ms without pitch.
   const phrases = [];
@@ -544,7 +550,7 @@ function curveText(dir, project, track, from, to) {
     lastVoiced = i;
   }
   if (start >= 0) phrases.push([start, lastVoiced + 1]);
-  if (!phrases.length) out.push('(音程のある音が検出されませんでした)');
+  if (!phrases.length) out.push(t('curve.noPitch'));
 
   for (const [a, b] of phrases) {
     if (b * hopSec + off < from || a * hopSec + off > to) continue;
@@ -573,36 +579,36 @@ function curveText(dir, project, track, from, to) {
 
 function cliCurve(args) {
   const { dir, project } = loadProjectOrFail(args);
-  const withTake = project.tracks.filter((t) => t.take);
+  const withTake = project.tracks.filter((tr) => tr.take);
   const tracks = typeof args.track === 'string' ? [findTrack(project, args.track)] : withTake;
-  if (!tracks.length) throw new Error('録音のあるトラックがありません');
-  for (const t of tracks) if (!t.take) throw new Error(`"${t.name}" には元の録音がありません（Claude が作ったトラックなど）`);
+  if (!tracks.length) throw new Error(t('curve.noTakes'));
+  for (const tr of tracks) if (!tr.take) throw new Error(t('curve.noTake', { name: tr.name }));
   const from = Number(args.from) || 0;
   const to = args.to != null ? Number(args.to) : Infinity;
   const beat = 60 / project.bpm;
   const out = [];
-  out.push(`bpm ${project.bpm}  1拍=${beat.toFixed(3)}s  1小節=${(beat * project.beatsPerBar).toFixed(3)}s (${project.beatsPerBar}拍)  latencyMs ${project.latencyMs}`);
-  out.push('時刻はすべて曲の時刻（秒、各トラックの offsetMs 適用後）。set-notes に渡すノートも同じ時刻で書く。');
-  out.push('音高曲線: 30ms ごとの「MIDI音高(小数)/音量0-9」。 . は音程なし（息・子音・無音）。行頭は秒。');
-  out.push('小数部は半音内のずれ（例 62.4 は D より 40 セント高い）。[ ] は 150ms 以上の無音で区切ったフレーズ。');
-  for (const t of tracks) out.push('', curveText(dir, project, t, from, to));
+  out.push(t('curve.head1', { bpm: project.bpm, beat: beat.toFixed(3), bar: (beat * project.beatsPerBar).toFixed(3), beats: project.beatsPerBar, latency: project.latencyMs }));
+  out.push(t('curve.head2'));
+  out.push(t('curve.head3'));
+  out.push(t('curve.head4'));
+  for (const tr of tracks) out.push('', curveText(dir, project, tr, from, to));
   console.log(out.join('\n'));
 }
 
 function cliSetNotes(args) {
   const { dir, project } = loadProjectOrFail(args);
   const track = findTrack(project, args.track);
-  if (typeof args.notes !== 'string') throw new Error('--notes <file.json> を指定してください（[{t,d,p,v?}, ...] の配列）');
+  if (typeof args.notes !== 'string') throw new Error(t('set.notesRequired'));
   const parsed = JSON.parse(fs.readFileSync(path.resolve(args.notes), 'utf8'));
   const input = Array.isArray(parsed) ? parsed : parsed.notes;
-  if (!Array.isArray(input) || !input.length) throw new Error('ノートの配列が空です');
+  if (!Array.isArray(input) || !input.length) throw new Error(t('set.empty'));
   for (const n of input) {
     if (![n.t, n.d, n.p].every((x) => typeof x === 'number' && isFinite(x)) || n.d <= 0 || n.t < 0 || n.p < 0 || n.p > 127) {
-      throw new Error(`不正なノート: ${JSON.stringify(n)}`);
+      throw new Error(t('set.badNote', { note: JSON.stringify(n) }));
     }
   }
   if (typeof args.instrument === 'string' && args.instrument !== 'voice' && !GM_NAMES.includes(args.instrument)) {
-    throw new Error(`楽器名 "${args.instrument}" は一覧にありません（scripts/shared.mjs の GM_NAMES を参照）`);
+    throw new Error(t('set.badInstrument', { name: args.instrument }));
   }
   // Input is in project time; notes are stored relative to the take.
   const off = track.offsetMs / 1000;
@@ -615,52 +621,53 @@ function cliSetNotes(args) {
   if (typeof args.instrument === 'string') {
     track.instrument = args.instrument;
     track.planned = null;
-    inst = `、楽器を ${args.instrument} に`;
+    inst = t('set.instrument', { name: args.instrument });
   }
   writeProject(dir, project);
-  console.log(`${track.name}: ${track.original.length} ノート → ${notes.length} ノートに置き換えました${inst}（清書前はページの「清書前と入れ替え」か restore で戻せます）`);
+  console.log(t('set.done', { track: track.name, before: track.original.length, after: notes.length, inst }));
 }
 
 function cliRestore(args) {
   const { dir, project } = loadProjectOrFail(args);
   const track = findTrack(project, args.track);
-  if (!track.original) throw new Error('清書前のノートは保存されていません');
+  if (!track.original) throw new Error(t('restore.none'));
   track.notes = track.original;
   track.original = null;
   writeProject(dir, project);
-  console.log(`${track.name}: 清書前の ${track.notes.length} ノートに戻しました`);
+  console.log(t('restore.done', { track: track.name, count: track.notes.length }));
 }
 
 // Compare the first two recordings and report how far the overdub is off.
 function cliLatency(args) {
   const { dir, project } = loadProjectOrFail(args);
-  const takes = project.tracks.filter((t) => t.take).slice(0, 2);
-  if (takes.length < 2) throw new Error('録音が 2 つ以上必要です');
-  const sides = takes.map((t) => {
-    const { samples, sampleRate } = readWav(path.join(dir, t.take));
+  const takes = project.tracks.filter((tr) => tr.take).slice(0, 2);
+  if (takes.length < 2) throw new Error(t('lat.needTwo'));
+  const sides = takes.map((tr) => {
+    const { samples, sampleRate } = readWav(path.join(dir, tr.take));
     const { notes } = analyzeTake(samples, sampleRate, { snapToScale: false });
-    return { onsets: notes.map((n) => n.t + t.offsetMs / 1000), click: t.click ?? project.metronome };
+    return { onsets: notes.map((n) => n.t + tr.offsetMs / 1000), click: tr.click ?? project.metronome };
   });
   const r = measureLatency(project.bpm, sides[0], sides[1]);
   if (!r) {
-    console.log('計測できませんでした（音数が少ない、または 2 つの録音のリズムが対応していません）。');
+    console.log(t('lat.failed'));
     return;
   }
   const ms = Math.round(r.lag * 1000);
-  const how = r.method === 'grid' ? 'メトロノームの拍に対する両方の録音のずれ' : `"${takes[0].name}" に対する "${takes[1].name}" のずれ`;
-  console.log(`残っているずれ: ${ms >= 0 ? '+' : ''}${ms} ms（${how}、一致 ${r.matched} 音、ばらつき ±${Math.round(r.spread * 1000)} ms）。プラスは録音が遅れている。`);
-  if (!args.apply) return console.log('反映するには --apply を付けます（latencyMs に加算し、清書前のトラックの offsetMs から引きます）。');
-  if (Math.abs(ms) < 10) return console.log('ずれは 10 ms 未満なので変更しません。');
+  const how = r.method === 'grid' ? t('lat.howGrid') : t('lat.howPair', { a: takes[0].name, b: takes[1].name });
+  console.log(t('lat.result', { ms: `${ms >= 0 ? '+' : ''}${ms}`, how, matched: r.matched, spread: Math.round(r.spread * 1000) }));
+  if (!args.apply) return console.log(t('lat.applyHint'));
+  if (Math.abs(ms) < 10) return console.log(t('lat.tooSmall'));
   project.latencyMs += ms;
   const targets = r.method === 'grid' ? takes : [takes[1]];
-  for (const t of targets) if (!t.original) t.offsetMs -= ms;
+  for (const tr of targets) if (!tr.original) tr.offsetMs -= ms;
   project.latencyCalibrated = true;
   writeProject(dir, project);
-  console.log(`反映しました: latencyMs = ${project.latencyMs}、ずらしたトラック: ${targets.filter((t) => !t.original).map((t) => t.name).join(', ') || 'なし（清書済みのため）'}`);
+  console.log(t('lat.applied', { latency: project.latencyMs, tracks: targets.filter((tr) => !tr.original).map((tr) => tr.name).join(', ') || t('lat.noTracks') }));
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (typeof args.lang === 'string') t = translator(pickLang(args.lang));
   const cmd = args._[0] || 'serve';
   if (cmd === 'serve') return serve(args);
   if (cmd === 'midi') return cliMidi(args);

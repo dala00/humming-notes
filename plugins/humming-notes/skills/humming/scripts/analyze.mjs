@@ -136,7 +136,7 @@ export function estimateKey(weights) {
   return {
     tonic: best.tonic,
     fit: best.fit,
-    name: `${PITCH_CLASS_NAMES[best.tonic]} メジャー / ${PITCH_CLASS_NAMES[(best.tonic + 9) % 12]} マイナー`,
+    name: `${PITCH_CLASS_NAMES[best.tonic]} major / ${PITCH_CLASS_NAMES[(best.tonic + 9) % 12]} minor`,
     scale: MAJOR.map((s) => (best.tonic + s) % 12),
   };
 }

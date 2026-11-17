@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,35 +7,38 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<!-- Text is English here; app.js swaps in the chosen language through data-i18n / data-i18n-title (see /lib/i18n.mjs). -->
 <header>
   <h1>Humming Notes</h1>
-  <label title="この曲を選ぶと、その曲に切り替わります。変更は自動で保存されます。">曲 <select id="song"></select></label>
-  <button id="songNew" title="空の曲を新しく作って切り替えます。今の曲はそのまま残ります。">新しい曲</button>
-  <button id="songCopy" title="今の曲を録音ごと別の名前で複製し、複製のほうに切り替えます。">複製</button>
-  <button id="songRename" title="今の曲の名前（フォルダ名と書き出しファイル名）を変えます。">名前を変更</button>
-  <label>BPM <input id="bpm" type="number" min="30" max="300" step="1"></label>
-  <label>拍子 <input id="beatsPerBar" type="number" min="1" max="12" step="1"> /4</label>
-  <label><input id="metronome" type="checkbox"> メトロノーム</label>
-  <label>カウントイン <input id="countInBars" type="number" min="0" max="4" step="1"> 小節</label>
-  <label title="録音をノートに変換するとき、調から外れたあいまいな音を調の音に寄せます。"><input id="snapToScale" type="checkbox"> 調に寄せる</label>
-  <label title="楽器の音色セット。高音質は初回の読み込みに少し時間がかかります。">音源 <select id="soundfont"></select></label>
-  <label title="部屋の響きの量。0 で響きなし。">リバーブ <input id="reverb" type="range" min="0" max="0.6" step="0.05"></label>
-  <label title="重ね録りがずれるときに調整します。録音が遅れて聞こえるなら大きくします。">遅延補正 <input id="latencyMs" type="number" step="10"> ms</label>
-  <button id="calibrate" title="クリックが 12 回鳴ります。最初の 4 回は聞くだけ、残りの 8 回に合わせて短く「あ」と声を出すと、録音のずれを測って補正します。機器（ヘッドホンやマイク）を変えたらやり直してください。">遅延を計測</button>
+  <label data-i18n-title="h.songTitle"><span data-i18n="h.song">Song</span> <select id="song"></select></label>
+  <button id="songNew" data-i18n="h.songNew" data-i18n-title="h.songNewTitle">New song</button>
+  <button id="songCopy" data-i18n="h.songCopy" data-i18n-title="h.songCopyTitle">Duplicate</button>
+  <button id="songRename" data-i18n="h.songRename" data-i18n-title="h.songRenameTitle">Rename</button>
+  <label><span data-i18n="h.bpm">BPM</span> <input id="bpm" type="number" min="30" max="300" step="1"></label>
+  <label><span data-i18n="h.beats">Beats</span> <input id="beatsPerBar" type="number" min="1" max="12" step="1"> /4</label>
+  <label><input id="metronome" type="checkbox"> <span data-i18n="h.metronome">Metronome</span></label>
+  <label><span data-i18n="h.countIn">Count-in</span> <input id="countInBars" type="number" min="0" max="4" step="1"> <span data-i18n="h.bars">bars</span></label>
+  <label data-i18n-title="h.snapTitle"><input id="snapToScale" type="checkbox"> <span data-i18n="h.snap">Snap to key</span></label>
+  <label data-i18n-title="h.soundfontTitle"><span data-i18n="h.soundfont">Sounds</span> <select id="soundfont"></select></label>
+  <label data-i18n-title="h.reverbTitle"><span data-i18n="h.reverb">Reverb</span> <input id="reverb" type="range" min="0" max="0.6" step="0.05"></label>
+  <label data-i18n-title="h.latencyTitle"><span data-i18n="h.latency">Latency fix</span> <input id="latencyMs" type="number" step="10"> ms</label>
+  <button id="calibrate" data-i18n="h.calibrate" data-i18n-title="h.calibrateTitle">Measure latency</button>
+  <span class="spacer"></span>
+  <label><span data-i18n="h.lang">Language</span> <select id="lang"></select></label>
 </header>
 
 <section class="transport">
-  <button id="rec" class="rec">● 録音</button>
-  <label>次の録音の楽器 <select id="nextInstrument"></select></label>
-  <label title="録音を楽器音にせず、自分の声のまま重ねていきます。変換前の音につられずに歌えます。録り終えたら Claude に「まとめて変換して」と頼むと、全パートを見比べて丁寧に楽器のノートにします。"><input id="draft" type="checkbox"> 下書き録音（生声で重ね、あとでまとめて変換）</label>
-  <button id="play">▶ 再生</button>
-  <button id="stop">■ 停止</button>
-  <button id="undo" title="Ctrl+Z">↶ 元に戻す</button>
+  <button id="rec" class="rec">● Record</button>
+  <label><span data-i18n="t.nextInstrument">Instrument for the next take</span> <select id="nextInstrument"></select></label>
+  <label data-i18n-title="t.draftTitle"><input id="draft" type="checkbox"> <span data-i18n="t.draft">Draft recording (layer your voice, convert everything later)</span></label>
+  <button id="play" data-i18n="t.play">▶ Play</button>
+  <button id="stop" data-i18n="t.stop">■ Stop</button>
+  <button id="undo" title="Ctrl+Z" data-i18n="t.undo">↶ Undo</button>
   <span class="spacer"></span>
-  <span class="meter" title="マイク入力レベル"><span id="level"></span></span>
+  <span class="meter" data-i18n-title="t.meterTitle"><span id="level"></span></span>
   <span id="clock">0:00.0</span>
   <span class="spacer"></span>
-  <button id="exportMp3">MP3 書き出し</button>
+  <button id="exportMp3" data-i18n="t.exportMp3">Export MP3</button>
   <button id="exportWav">WAV</button>
   <button id="exportMidi">MIDI</button>
 </section>
@@ -45,23 +48,35 @@
 <section class="roll">
   <canvas id="canvas"></canvas>
 </section>
-<p class="hint">
-  ピアノロール: クリックで再生・録音の開始位置、ノートをクリックして選択（↑↓ 音程 / Shift+↑↓ オクターブ / ←→ 位置 / Delete 削除）、ホイールで横スクロール。Space で再生・停止。
-  重ね録りはヘッドホン推奨です（スピーカーだと伴奏をマイクが拾います）。
+<p class="hint" data-i18n="roll.hint">
+  Piano roll: click to set where playback and recording start; click a note to select it. Space plays and stops.
 </p>
 
 <section>
   <table id="tracks">
     <thead>
-      <tr><th></th><th>トラック名</th><th>楽器</th><th>音量</th><th>定位（左 ↔ 右）</th><th>ミュート</th><th>移調（半音）</th><th>クオンタイズ</th><th>ずらし（ms）</th><th>ノート数</th><th></th><th></th></tr>
+      <tr>
+        <th></th>
+        <th data-i18n="th.name">Track name</th>
+        <th data-i18n="th.instrument">Instrument</th>
+        <th data-i18n="th.volume">Volume</th>
+        <th data-i18n="th.pan">Pan (left ↔ right)</th>
+        <th data-i18n="th.mute">Mute</th>
+        <th data-i18n="th.transpose">Transpose (semitones)</th>
+        <th data-i18n="th.quantize">Quantize</th>
+        <th data-i18n="th.offset">Shift (ms)</th>
+        <th data-i18n="th.notes">Notes</th>
+        <th></th>
+        <th></th>
+      </tr>
     </thead>
     <tbody></tbody>
   </table>
-  <p id="empty" class="hint">初めて使う機器では、先に上の「遅延を計測」を一度行うと、録音がメトロノームとずれなくなります。<br>まだトラックがありません。「● 録音」を押して鼻歌を歌い、もう一度押すと指定した楽器のノートに変換されます。</p>
+  <p id="empty" class="hint"><span data-i18n="empty.calibrate"></span><br><span data-i18n="empty.start"></span></p>
 </section>
 
 <footer class="hint">
-  変更は自動で <code id="projectPath">project.json</code> に保存されます。このファイルは Claude Code と共有しています。変換が粗いときは Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に直します。ほかにも「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
+  <span data-i18n="footer.before">Changes are saved automatically to</span> <code id="projectPath">project.json</code><span data-i18n="footer.after">.</span>
 </footer>
 
 <dialog id="songDialog">
@@ -69,8 +84,8 @@
     <label><span id="songDialogTitle"></span><br><input id="songDialogName" type="text" size="28" maxlength="60" autocomplete="off"></label>
     <div id="songDialogError" class="status error"></div>
     <div class="buttons">
-      <button type="button" id="songDialogCancel">キャンセル</button>
-      <button type="submit" id="songDialogOk">OK</button>
+      <button type="button" id="songDialogCancel" data-i18n="dialog.cancel">Cancel</button>
+      <button type="submit" id="songDialogOk" data-i18n="dialog.ok">OK</button>
     </div>
   </form>
 </dialog>

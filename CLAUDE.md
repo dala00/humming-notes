@@ -14,6 +14,7 @@ plugins/humming-notes/skills/humming/
   scripts/humming.mjs   ローカルサーバー兼 CLI
   scripts/analyze.mjs   鼻歌 → ノート変換、遅延計測（純粋関数）
   scripts/shared.mjs    プロジェクトの正規化、楽器一覧、実効ノート、MIDI 生成
+  scripts/i18n.mjs      ページと CLI の文言（英語が基準、日本語あり）
   scripts/selftest.mjs  テスト
   web/                  録音・再生・書き出しページ（app.js が本体）
 humming-projects/       曲データ。Git 管理外
@@ -33,9 +34,10 @@ npm 依存はない（Node 18 以上）。ビルドもない。`package.json` �
 
 ## 設計上の約束
 
-- **`analyze.mjs` と `shared.mjs` はブラウザと Node の両方で動かす。** サーバーが `/lib/` として配信し、ページが import する。Node 専用 API や DOM を使わない。
+- **`analyze.mjs` `shared.mjs` `i18n.mjs` はブラウザと Node の両方で動かす。** サーバーが `/lib/` として配信し、ページが import する。Node 専用 API や DOM を使わない。
 - **再生と書き出しは同じ経路を通す。** `scheduleProject` と `buildMaster` を、実時間の `AudioContext` と `OfflineAudioContext` の両方で使う。片方だけに音の処理を足すと、聞いた音と書き出した音が食い違う。乱数を使う処理（リバーブの残響、揺らぎ）は種を固定して毎回同じ結果にする。
 - **ノートの時刻は 2 種類ある。** `project.json` の `notes[].t` は録音基準（`offsetMs` 適用前）。CLI の `curve` の表示と `set-notes` の入力は曲の時刻（`offsetMs` 適用後）。実際に鳴る位置は `effectiveNotes()` が決めるので、再生・書き出し・MIDI は必ずこれを通す。
+- **文言はコードに直接書かない。** ページと CLI の文言は `i18n.mjs` にキーで登録し、`t('キー', {値})` で取り出す。英語（`en`）が基準で、日本語（`ja`）には同じキーと同じ `{プレースホルダー}` を必ず用意する。`index.html` の固定文言は `data-i18n` / `data-i18n-title` で指定する。サーバーがページに返すエラーは `code` を付け、ページ側で `err.<code>` に訳す。キーの過不足、未定義のキー、`i18n.mjs` 以外に残った日本語は `selftest.mjs` が検出する。
 - **`normalizeProject()` が項目の番人。** 知らない項目は捨てられる。プロジェクトやトラックに項目を足すときは、既定値と正規化をここに書く。サーバーも保存時にこれを通すので、足し忘れるとページの保存で項目が消える。
 - **元データを消さない。** 録音は `takes/` に残し、清書前のノートは `original` に退避する。ユーザーがいつでも戻せることを保つ。
 - **開いている曲はサーバーの実行中に変わる。** ページから曲を切り替え・作成・複製・改名できる（`/api/songs`）。サーバーは開いた曲のフォルダ名を `humming-projects/.current` に書き、CLI は `--project` がなければそれに従う。ページは切り替え後に再読み込みして、前の曲の録音や取り消し履歴を持ち越さない。
@@ -43,7 +45,7 @@ npm 依存はない（Node 18 以上）。ビルドもない。`package.json` �
 
 ## はまりどころ
 
-- **サーバーは起動時に `scripts/*.mjs` を読み込む。** `humming.mjs` `shared.mjs` `analyze.mjs` を変えたらサーバーを再起動する。`web/` 以下と `/lib/` の配信は毎回ディスクから読むので、ページの再読み込みだけでよい。古いサーバーのまま新しい項目を保存すると、その項目が消える。
+- **サーバーは起動時に `scripts/*.mjs` を読み込む。** `humming.mjs` `shared.mjs` `analyze.mjs` `i18n.mjs` を変えたらサーバーを再起動する。`web/` 以下と `/lib/` の配信は毎回ディスクから読むので、ページの再読み込みだけでよい。古いサーバーのまま新しい項目を保存すると、その項目が消える。
 - **マイク録音は自動テストできない。** ページは `window.humming` を公開している。`addTake(Float32Array, サンプルレート, 開始秒, 楽器)` に合成した波形を渡すと、録音後と同じ経路を通せる。`renderMix()` のあと `mixPeak` で再生時のピークがわかる。実マイクでの確認はユーザーに頼む。
 - **Claude は音を聞けない。** 音の変更はレベル、左右の相関、帯域ごとのエネルギーなど数値で確かめ、良し悪しはユーザーの感想で決める。ffmpeg と Python（numpy）が使える。
 - **Bash ツールのヒアドキュメント**は、本文にアポストロフィが奇数個あると失敗することがある。長いパッチは Write でスクリプトをファイルに書いてから実行する。
@@ -54,8 +56,8 @@ npm 依存はない（Node 18 以上）。ビルドもない。`package.json` �
 
 ## 進め方
 
-- ページの文言、スキルの説明、ユーザーへの返答は日本語。コード中のコメントは英語。
+- ページと CLI の文言は英語と日本語の両方を `i18n.mjs` に書く。README は英語（`README.md`）と日本語（`README.ja.md`）の両方を更新する。SKILL.md とユーザーへの返答は日本語。コード中のコメントは英語。
 - 機能を足したら、`selftest.mjs` にテストを足し、Chrome で実際にページを動かして確かめる。
-- ユーザーに見える挙動や `project.json` の項目を変えたら、同じコミットで SKILL.md と README.md を更新する。
+- ユーザーに見える挙動や `project.json` の項目を変えたら、同じコミットで SKILL.md と README（両言語）を更新する。
 - 区切りごとに `main` へコミットする。プッシュはしない。
 - ユーザーの曲データを大きく書き換える前に、同じフォルダへ `project.json` をコピーして退避する。

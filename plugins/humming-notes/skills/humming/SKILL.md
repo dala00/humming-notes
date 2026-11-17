@@ -1,6 +1,6 @@
 ---
 name: humming
-description: 鼻歌をブラウザで録音して楽器のノート（MIDI 相当）に変換し、重ね録りで曲を組み立てて MP3 / WAV / MIDI に書き出す。ユーザーが「鼻歌から曲を作りたい」「鼻歌を録音したい」「ハミングを MIDI にしたい」「さっきの鼻歌の楽器を変えて／ハモリを足して／MP3 にして」などと言ったときに使う。録音ページの起動、project.json の編集による楽器変更・補正・伴奏追加、書き出しまでを扱う。
+description: Record humming in the browser, turn it into instrument notes (MIDI-like), overdub parts into a song and export MP3 / WAV / MIDI. Use when the user wants to make music by humming, record humming, turn humming into MIDI, or change the instrument / add a harmony / export an MP3 of what they hummed. 鼻歌をブラウザで録音して楽器のノート（MIDI 相当）に変換し、重ね録りで曲を組み立てて MP3 / WAV / MIDI に書き出す。ユーザーが「鼻歌から曲を作りたい」「鼻歌を録音したい」「ハミングを MIDI にしたい」「さっきの鼻歌の楽器を変えて／ハモリを足して／MP3 にして」などと言ったときに使う。録音ページの起動、project.json の編集による楽器変更・補正・伴奏追加、書き出しまでを扱う。
 ---
 
 # Humming Notes
@@ -12,6 +12,25 @@ description: 鼻歌をブラウザで録音して楽器のノート（MIDI 相�
 - **Claude（あなた）**: サーバーの起動、録音の清書（音高曲線を読んで丁寧にノート化し直す）、ユーザーの言葉を受けて `project.json` を直接編集（楽器の指定、移調、クオンタイズ、音の修正、ハモリや伴奏トラックの作曲）、書き出しコマンドの実行。
 
 ページと Claude は同じ `project.json` を共有する。Claude がファイルを書き換えると、ページは約 1.5 秒以内に自動で読み込み直す。
+
+## 言語
+
+- **ユーザーへの返答はユーザーの言語で行う。** この手順書は日本語だが、英語で話しかけられたら英語で答える。
+- **ページは英語が基準で、ブラウザの言語が日本語なら日本語で表示される。** ページ右上の「言語 / Language」で切り替えられる。この手順書に出てくるボタン名は日本語表示のもの。英語表示では次の名前になるので、ユーザーの表示に合わせて伝える。
+
+  | 日本語 | English |
+  | --- | --- |
+  | ● 録音 / ■ 停止して変換 | ● Record / ■ Stop and convert |
+  | ▶ 再生 | ▶ Play |
+  | 遅延を計測 | Measure latency |
+  | 次の録音の楽器 | Instrument for the next take |
+  | 下書き録音 | Draft recording |
+  | 清書前と入れ替え | Swap with pre-clean-up |
+  | MP3 書き出し | Export MP3 |
+  | 曲 / 新しい曲 / 複製 / 名前を変更 | Song / New song / Duplicate / Rename |
+
+- **コマンドの出力はシステムの言語（日本語か英語）になる。** 内容は同じ。固定したいときは `--lang ja` か `--lang en` を付ける。
+- ページで付くトラック名の既定値（「ピアノ 1」「Piano 1」など）は、録音したときの表示言語になる。
 
 ## 起動
 

@@ -1,15 +1,36 @@
 import {
   SOUNDFONTS,
   INSTRUMENT_CHOICES,
-  instrumentLabel,
   isKnownInstrument,
   normalizeProject,
   effectiveNotes,
   songDuration,
 } from '/lib/shared.mjs';
 import { analyzeTake, measureLatency, measureClickLag } from '/lib/analyze.mjs';
+import { LANGS, pickLang, translator } from '/lib/i18n.mjs';
 
 const $ = (id) => document.getElementById(id);
+
+// The language follows the browser unless the user picked one in the header.
+const LANG_KEY = 'humming.lang';
+function storedLang() {
+  try {
+    return localStorage.getItem(LANG_KEY);
+  } catch {
+    return null;
+  }
+}
+let t = translator(pickLang(storedLang(), ...(navigator.languages || []), navigator.language));
+const instLabel = (name) => (t.has(`inst.${name}`) ? t(`inst.${name}`) : name);
+// The server reports errors as a code plus English text; show the code in the page's language.
+const serverError = (json) => (json.code && t.has(`err.${json.code}`) ? t(`err.${json.code}`, json) : json.error);
+
+// Fixed text lives in index.html in English, tagged with data-i18n / data-i18n-title.
+function applyStaticText() {
+  document.documentElement.lang = t.lang;
+  for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  for (const node of document.querySelectorAll('[data-i18n-title]')) node.title = t(node.dataset.i18nTitle);
+}
 const COLORS = ['#5ab0ff', '#ff8a5a', '#7fd88f', '#e07be0', '#ffd24d', '#5ad8d0', '#ff6b8b', '#a59bff'];
 const EXPORT_RATE = 44100;
 const MASTER_GAIN = 1.6;
@@ -63,7 +84,7 @@ async function loadProject() {
   const res = await fetch('/api/project');
   const json = await res.json();
   if (json.error) {
-    status(json.error, 'error');
+    status(serverError(json), 'error');
     if (!project) project = normalizeProject({});
   } else {
     project = normalizeProject(json.project);
@@ -100,16 +121,16 @@ async function save() {
         body: JSON.stringify({ project, baseMtime, dir: songDir }),
       });
       if (res.status === 409) {
-        status('project.json が外部（Claude）で更新されたため、そちらを読み込みました。', 'warn');
+        status(t('sync.external'), 'warn');
         undoStack.length = 0;
         await loadProject();
       } else if (res.ok) {
         baseMtime = (await res.json()).mtime;
       } else {
-        status(`保存に失敗しました: ${res.status}`, 'error');
+        status(t('save.failed', { detail: res.status }), 'error');
       }
     } catch (e) {
-      status(`保存に失敗しました（サーバーが止まっていませんか）: ${e.message}`, 'error');
+      status(t('save.failedServer', { detail: e.message }), 'error');
     }
   })();
   await saving;
@@ -128,13 +149,13 @@ function change(fn) {
 
 function undo() {
   const prev = undoStack.pop();
-  if (!prev) return status('これ以上戻せません。');
+  if (!prev) return status(t('undo.none'));
   project = normalizeProject(JSON.parse(prev));
   if (!trackById(selectedTrack)) selectedTrack = null;
   selectedNote = null;
   scheduleSave();
   render();
-  status('元に戻しました。');
+  status(t('undo.done'));
 }
 
 async function poll() {
@@ -144,7 +165,7 @@ async function poll() {
     if ((json.mtime !== baseMtime || json.dir !== songDir) && !isDirty() && mode !== 'recording' && mode !== 'busy') {
       undoStack.length = 0;
       await loadProject();
-      status('Claude 側の変更を読み込みました。', 'ok');
+      status(t('sync.loaded'), 'ok');
     }
     for (const cmd of json.commands || []) {
       if (cmd.type === 'export') exportAudio(cmd.format, cmd.id);
@@ -164,7 +185,7 @@ async function loadSongs() {
   try {
     const { current, songs } = await (await fetch('/api/songs')).json();
     sel.textContent = '';
-    for (const s of songs) sel.append(el('option', { value: s.folder, textContent: s.name === s.folder ? s.name : `${s.name}（${s.folder}）` }));
+    for (const s of songs) sel.append(el('option', { value: s.folder, textContent: s.name === s.folder ? s.name : `${s.name} (${s.folder})` }));
     sel.value = current;
     sel.dataset.current = current;
   } catch {
@@ -175,11 +196,11 @@ async function loadSongs() {
 // body: {action: 'open', folder} | {action: 'new' | 'copy' | 'rename', name}
 async function songAction(body) {
   if (mode === 'playing') stop();
-  if (mode !== 'idle' || exporting) throw new Error('録音や書き出しが終わってから操作してください。');
+  if (mode !== 'idle' || exporting) throw new Error(t('song.busy'));
   if (isDirty()) await save();
   const res = await fetch('/api/songs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `失敗しました: ${res.status}`);
+  if (!res.ok) throw new Error(serverError(json) || t('failed', { detail: res.status }));
   location.reload();
 }
 
@@ -299,7 +320,7 @@ async function loadTake(track) {
     if (!res.ok) throw new Error(String(res.status));
     takes.set(track.id, await decodeCtx.decodeAudioData(await res.arrayBuffer()));
   } catch {
-    status(`「${track.name}」の録音データ（${track.take}）を読めませんでした。`, 'warn');
+    status(t('take.unreadable', { name: track.name, file: track.take }), 'warn');
   }
 }
 
@@ -323,7 +344,7 @@ async function preload() {
     const before = failedInstruments.size;
     await Promise.all(jobs);
     if (failedInstruments.size > before) {
-      status(`音色を取得できなかった楽器は簡易シンセ音で鳴らします: ${[...failedInstruments].join(', ')}`, 'warn');
+      status(t('sf.fallback', { list: [...failedInstruments].join(', ') }), 'warn');
     }
   }
 }
@@ -438,20 +459,20 @@ async function play() {
   stopSession();
   mode = 'busy';
   updateButtons();
-  status('音色を読み込み中…');
+  status(t('play.loading'));
   try {
     await ensureAudio();
     await preload();
   } catch (e) {
     mode = 'idle';
     updateButtons();
-    return status(`再生できません: ${e.message}`, 'error');
+    return status(t('play.failed', { detail: e.message }), 'error');
   }
   const dur = duration();
   if (dur <= 0) {
     mode = 'idle';
     updateButtons();
-    return status('再生できるノートがまだありません。');
+    return status(t('play.empty'));
   }
   refreshMaster();
   const from = cursor >= dur - 0.05 ? 0 : cursor;
@@ -459,7 +480,7 @@ async function play() {
   session = { kind: 'play', t0, from, end: dur, nodes: scheduleProject(ctx, master, t0, from) };
   if (project.metronome) startMetronome(session, Math.ceil(from / beatSec() - 1e-6), 0, true);
   mode = 'playing';
-  if (!$('status').classList.contains('warn')) status('再生中…');
+  if (!$('status').classList.contains('warn')) status(t('play.playing'));
   updateButtons();
 }
 
@@ -477,7 +498,7 @@ function stop() {
 async function ensureMic() {
   if (mic) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    throw new Error('このブラウザではマイクを使えません（http://localhost で開いてください）。');
+    throw new Error(t('mic.unsupported'));
   }
   let stream;
   try {
@@ -485,7 +506,7 @@ async function ensureMic() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     });
   } catch (e) {
-    throw new Error(`マイクを使えません。ブラウザのマイク許可を確認してください（${e.name}）。`);
+    throw new Error(t('mic.denied', { detail: e.name }));
   }
   await ctx.audioWorklet.addModule('/recorder-worklet.js');
   const source = ctx.createMediaStreamSource(stream);
@@ -513,7 +534,7 @@ async function record() {
   try {
     await ensureAudio();
     await ensureMic();
-    status('準備中…');
+    status(t('rec.preparing'));
     await preload();
   } catch (e) {
     mode = 'idle';
@@ -543,7 +564,7 @@ async function record() {
   const firstBeat = Math.round(from / beatLen);
   startMetronome(s, firstBeat - countBeats, firstBeat - 1, project.metronome);
   mode = 'recording';
-  status(countBeats ? `カウントイン ${project.countInBars} 小節のあと録音が始まります。歌い終わったら「■ 停止して変換」。` : '録音中… 歌い終わったら「■ 停止して変換」。');
+  status(countBeats ? t('rec.countIn', { bars: project.countInBars }) : t('rec.recording'));
   updateButtons();
 }
 
@@ -586,12 +607,12 @@ async function stopRecording() {
   if (!result) {
     mode = 'idle';
     updateButtons();
-    return status('録音が短すぎました（カウントイン中に止めた場合は録音されません）。', 'warn');
+    return status(t('rec.tooShort'), 'warn');
   }
   try {
     await addTake(result, sr, s.from, s.instrument);
   } catch (e) {
-    status(`変換に失敗しました: ${e.message}`, 'error');
+    status(t('rec.convertFailed', { detail: e.message }), 'error');
   }
   mode = 'idle';
   updateButtons();
@@ -628,14 +649,14 @@ function encodeWav(channels, sampleRate) {
 
 // Turn recorded samples (starting at project time `startPos`) into a new track.
 async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project.next.instrument) {
-  status('ノートに変換中…');
+  status(t('rec.converting'));
   await sleep(30);
   const contextNotes = project.tracks.flatMap((tr) => tr.notes.map((n) => ({ p: n.p + tr.transpose, d: n.d })));
   const { notes, detuneCents } = analyzeTake(samplesIn, sampleRate, { snapToScale: project.snapToScale, contextNotes });
   // Draft: keep the voice for now and remember which instrument it should become.
   const draft = project.draft && instrument !== 'voice';
   if (!notes.length && instrument !== 'voice' && !draft) {
-    status('音程を検出できませんでした。マイクに近づいて「ラ」「ナ」などではっきり歌ってみてください。', 'warn');
+    status(t('rec.noPitch'), 'warn');
     return null;
   }
   const id = `t${Date.now().toString(36)}`;
@@ -658,7 +679,7 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
   change(() => {
     project.tracks.push({
       id,
-      name: `${instrumentLabel(instrument).replace(/（.*/, '')} ${project.tracks.length + 1}`,
+      name: `${instLabel(instrument).replace(/\s*[（(].*/, '')} ${project.tracks.length + 1}`,
       instrument: draft ? 'voice' : instrument,
       planned: draft ? instrument : null,
       click: project.metronome,
@@ -674,9 +695,9 @@ async function addTake(samplesIn, sampleRate, startPos = 0, instrument = project
     selectedTrack = id;
     selectedNote = null;
   });
-  const tuning = Math.abs(detuneCents) >= 15 ? `（全体に ${detuneCents > 0 ? '+' : ''}${detuneCents} セント寄っていたので補正しました）` : '';
-  if (draft) status('下書きとして録音しました（生声で再生されます）。続けて重ね録りし、録り終えたら Claude に「まとめて変換して」と頼んでください。', 'ok');
-  else status(`${notes.length} 個のノートに変換しました${tuning}。再生して確認し、続けて重ね録りできます。`, 'ok');
+  const tuning = Math.abs(detuneCents) >= 15 ? t('rec.tuning', { cents: `${detuneCents > 0 ? '+' : ''}${detuneCents}` }) : '';
+  if (draft) status(t('rec.draftDone'), 'ok');
+  else status(t('rec.done', { count: notes.length, tuning }), 'ok');
   if (!project.latencyCalibrated && project.tracks.filter((t) => t.take).length === 2) calibrate(false);
   return id;
 }
@@ -722,15 +743,15 @@ async function calibrateWithClicks() {
   mic.node.port.postMessage('start');
   const t0 = ctx.currentTime + 0.5;
   for (let k = 0; k < CAL.total; k++) click(t0 + k * CAL.beat, k < CAL.listen);
-  status(`遅延を計測します。最初の ${CAL.listen} 回（高い音）は聞くだけ…`);
+  status(t('cal.listen', { n: CAL.listen }));
   await sleep((0.5 + (CAL.listen - 0.5) * CAL.beat) * 1000);
-  status(`今です。クリックに合わせて短く「あ」と ${CAL.total - CAL.listen} 回、声を出してください。`, 'warn');
+  status(t('cal.now', { n: CAL.total - CAL.listen }), 'warn');
   await sleep(((CAL.total - CAL.listen + 0.5) * CAL.beat + 0.5) * 1000);
   mic.node.port.postMessage('stop');
   await Promise.race([finished, sleep(1000)]);
   mode = 'idle';
   updateButtons();
-  if (!chunks.length) return status('マイクから音が届きませんでした。マイクの設定を確認してください。', 'error');
+  if (!chunks.length) return status(t('cal.noSound'), 'error');
 
   const sr = ctx.sampleRate;
   const { all, tb } = joinChunks(chunks, sr);
@@ -739,10 +760,10 @@ async function calibrateWithClicks() {
   const clicks = Array.from({ length: CAL.total }, (_, k) => base + k * CAL.beat);
   const r = measureClickLag(all, sr, clicks);
   if (!r) {
-    return status('うまく測れませんでした。クリックに合わせて、短くはっきり「あ」と 4 回以上声を出してください（手拍子でも測れます）。', 'warn');
+    return status(t('cal.failed'), 'warn');
   }
   const ms = Math.round(r.lag * 1000);
-  const detail = `一致 ${r.matched} 回、ばらつき ±${Math.round(r.spread * 1000)} ms`;
+  const detail = t('cal.detail', { matched: r.matched, spread: Math.round(r.spread * 1000) });
   const stale = project.tracks.filter((t) => t.take && !t.original).map((t) => t.id);
   change(() => {
     project.latencyCalibrated = true;
@@ -752,9 +773,9 @@ async function calibrateWithClicks() {
     for (const id of stale) trackById(id).offsetMs -= ms;
   });
   rememberLatency(project.latencyMs);
-  if (Math.abs(ms) < 8) return status(`遅延を計測しました: ずれは ${ms} ms でほぼありません（${detail}）。このまま録音できます。`, 'ok');
-  const moved = stale.length ? ` 録音済みの ${stale.length} トラックも同じだけずらしました。` : '';
-  status(`遅延を計測しました: 録音が ${Math.abs(ms)} ms ${ms > 0 ? '遅れて' : '早く'}入っていたので補正しました（遅延補正 ${project.latencyMs} ms、${detail}）。${moved}このブラウザでは次の曲にも引き継ぎます。`, 'ok');
+  if (Math.abs(ms) < 8) return status(t('cal.none', { ms, detail }), 'ok');
+  const moved = stale.length ? t('cal.moved', { n: stale.length }) : '';
+  status(t(ms > 0 ? 'cal.fixedLate' : 'cal.fixedEarly', { ms: Math.abs(ms), total: project.latencyMs, detail, moved }), 'ok');
 }
 
 // Compare the first two recordings and correct the overdub delay.
@@ -762,7 +783,7 @@ async function calibrateWithClicks() {
 function calibrate(manual) {
   const pair = project.tracks.filter((t) => t.take).slice(0, 2);
   if (pair.length < 2) {
-    if (manual) status('遅延の計測には録音が 2 つ必要です。2 つ目を重ね録りすると自動で計測します。', 'warn');
+    if (manual) status(t('cal2.needTwo'), 'warn');
     return;
   }
   const side = (t) => ({
@@ -774,13 +795,13 @@ function calibrate(manual) {
   const prev = $('status').textContent;
   if (!r) {
     if (!manual) return;
-    return status('遅延を計測できませんでした（音数が少ないか、2 つの録音のリズムが対応していません）。', 'warn');
+    return status(t('cal2.failed'), 'warn');
   }
   const ms = Math.round(r.lag * 1000);
-  const detail = `${r.method === 'grid' ? 'メトロノーム基準' : '1 つ目の録音基準'}、一致 ${r.matched} 音、ばらつき ±${Math.round(r.spread * 1000)} ms`;
+  const detail = t('cal2.detail', { method: t(r.method === 'grid' ? 'cal2.methodGrid' : 'cal2.methodPair'), matched: r.matched, spread: Math.round(r.spread * 1000) });
   if (Math.abs(ms) < 10) {
     change(() => (project.latencyCalibrated = true));
-    return status(`${manual ? '' : prev + ' '}遅延を計測しました: ずれは ${ms} ms でほぼありません（${detail}）。`, 'ok');
+    return status(`${manual ? '' : prev + ' '}${t('cal2.none', { ms, detail })}`, 'ok');
   }
   const targets = (r.method === 'grid' ? pair : [pair[1]]).filter((t) => !t.original).map((t) => t.id);
   change(() => {
@@ -790,7 +811,7 @@ function calibrate(manual) {
   });
   rememberLatency(project.latencyMs);
   status(
-    `${manual ? '' : prev + ' '}遅延を計測しました: 録音が ${Math.abs(ms)} ms ${ms > 0 ? '遅れて' : '早く'}入っていたので補正しました（${detail}）。今後の録音にも適用されます。違和感があれば Ctrl+Z で戻せます。`,
+    `${manual ? '' : prev + ' '}${t(ms > 0 ? 'cal2.fixedLate' : 'cal2.fixedEarly', { ms: Math.abs(ms), detail })}`,
     'ok'
   );
 }
@@ -800,7 +821,7 @@ function calibrate(manual) {
 async function renderMix() {
   await preload();
   const dur = duration();
-  if (dur <= 0) throw new Error('書き出せるノートがありません');
+  if (dur <= 0) throw new Error(t('export.empty'));
   const octx = new OfflineAudioContext(2, Math.ceil((dur + 1 + (project.reverb > 0 ? project.reverbTime : 0.5)) * EXPORT_RATE), EXPORT_RATE);
   scheduleProject(octx, buildMaster(octx), 0, 0);
   const mix = await octx.startRendering();
@@ -856,25 +877,25 @@ let exporting = false;
 // format: 'mp3' | 'wav'. cmdId is set when Claude's CLI asked for the export.
 async function exportAudio(format, cmdId = null) {
   if (exporting) {
-    if (cmdId) reportCommandError(cmdId, '別の書き出しが実行中です');
+    if (cmdId) reportCommandError(cmdId, t('export.busy'));
     return null;
   }
   exporting = true;
   updateButtons();
   try {
-    status(`${format.toUpperCase()} を書き出し中…`);
+    status(t('export.working', { format: format.toUpperCase() }));
     const mix = await renderMix();
     const blob = format === 'wav' ? encodeWav([mix.getChannelData(0), mix.getChannelData(1)], mix.sampleRate) : await encodeMp3(mix);
     const q = new URLSearchParams({ format, name: project.name });
     if (cmdId) q.set('cmd', cmdId);
     const res = await fetch(`/api/export?${q}`, { method: 'PUT', body: blob });
-    if (!res.ok) throw new Error(`保存に失敗: ${res.status}`);
+    if (!res.ok) throw new Error(t('export.saveFailed', { detail: res.status }));
     const { file } = await res.json();
     if (!cmdId) download(blob, file.split(/[\\/]/).pop());
-    status(`書き出しました: ${file}`, 'ok');
+    status(t('export.done', { file }), 'ok');
     return file;
   } catch (e) {
-    status(`書き出しに失敗しました: ${e.message}`, 'error');
+    status(t('export.failed', { detail: e.message }), 'error');
     if (cmdId) reportCommandError(cmdId, e.message);
     return null;
   } finally {
@@ -894,9 +915,9 @@ async function exportMidi() {
     if (!res.ok) throw new Error(String(res.status));
     const file = decodeURIComponent(res.headers.get('X-Saved-To') || 'humming.mid');
     download(await res.blob(), file.split(/[\\/]/).pop());
-    status(`書き出しました: ${file}`, 'ok');
+    status(t('export.done', { file }), 'ok');
   } catch (e) {
-    status(`MIDI の書き出しに失敗しました: ${e.message}`, 'error');
+    status(t('export.midiFailed', { detail: e.message }), 'error');
   }
 }
 
@@ -904,7 +925,7 @@ async function exportMidi() {
 
 function updateButtons() {
   const rec = $('rec');
-  rec.textContent = mode === 'recording' ? '■ 停止して変換' : '● 録音';
+  rec.textContent = t(mode === 'recording' ? 'btn.recStop' : 'btn.rec');
   rec.classList.toggle('on', mode === 'recording');
   rec.disabled = mode === 'busy';
   $('play').disabled = mode === 'recording' || mode === 'busy';
@@ -918,10 +939,10 @@ function updateButtons() {
 function fillInstrumentSelect(sel, value) {
   sel.textContent = '';
   const choices = INSTRUMENT_CHOICES.some(([n]) => n === value) ? INSTRUMENT_CHOICES : [...INSTRUMENT_CHOICES, [value, value]];
-  for (const [name, label] of choices) {
+  for (const [name] of choices) {
     const o = document.createElement('option');
     o.value = name;
-    o.textContent = label;
+    o.textContent = instLabel(name);
     sel.appendChild(o);
   }
   sel.value = value;
@@ -935,7 +956,7 @@ function el(tag, props = {}, ...children) {
 
 function render() {
   const active = document.activeElement;
-  if (!$('soundfont').options.length) for (const [n, label] of SOUNDFONTS) $('soundfont').append(el('option', { value: n, textContent: label }));
+  if (!$('soundfont').options.length) for (const [n] of SOUNDFONTS) $('soundfont').append(el('option', { value: n, textContent: t(`sf.${n}`) }));
   $('soundfont').value = project.soundfont;
   for (const id of ['bpm', 'beatsPerBar', 'countInBars', 'latencyMs', 'reverb']) {
     if (active !== $(id)) $(id).value = project[id];
@@ -957,24 +978,24 @@ function render() {
     fillInstrumentSelect(inst, tr.instrument);
     if (!tr.take) [...inst.options].forEach((o) => (o.disabled = o.value === 'voice'));
     // A draft (voice) track also shows the instrument it is meant to become.
-    const planned = el('select', { title: 'まとめて変換するときの楽器', onchange: (e) => set('planned', e.target.value || null) });
-    planned.append(el('option', { value: '', textContent: '変換後: 未定' }));
-    for (const [n, label] of INSTRUMENT_CHOICES) if (n !== 'voice') planned.append(el('option', { value: n, textContent: `変換後: ${label}` }));
-    if (tr.planned && ![...planned.options].some((o) => o.value === tr.planned)) planned.append(el('option', { value: tr.planned, textContent: `変換後: ${tr.planned}` }));
+    const planned = el('select', { title: t('track.plannedTitle'), onchange: (e) => set('planned', e.target.value || null) });
+    planned.append(el('option', { value: '', textContent: t('track.plannedNone') }));
+    for (const [n] of INSTRUMENT_CHOICES) if (n !== 'voice') planned.append(el('option', { value: n, textContent: t('track.planned', { label: instLabel(n) }) }));
+    if (tr.planned && ![...planned.options].some((o) => o.value === tr.planned)) planned.append(el('option', { value: tr.planned, textContent: t('track.planned', { label: tr.planned }) }));
     planned.value = tr.planned || '';
     planned.hidden = tr.instrument !== 'voice';
     const vol = el('input', { type: 'range', min: 0, max: 1.5, step: 0.05, value: tr.volume, onchange: (e) => set('volume', Number(e.target.value)) });
-    const pan = el('input', { type: 'range', min: -1, max: 1, step: 0.05, value: tr.pan, title: '左右の位置（中央が 0）', onchange: (e) => set('pan', Number(e.target.value)) });
+    const pan = el('input', { type: 'range', min: -1, max: 1, step: 0.05, value: tr.pan, title: t('track.panTitle'), onchange: (e) => set('pan', Number(e.target.value)) });
     const mute = el('input', { type: 'checkbox', checked: tr.mute, onchange: (e) => set('mute', e.target.checked) });
     const transpose = el('input', { type: 'number', step: 1, min: -48, max: 48, value: tr.transpose, onchange: (e) => set('transpose', Number(e.target.value)) });
-    const octDown = el('button', { textContent: '−8va', title: '1 オクターブ下げる', onclick: () => set('transpose', tr.transpose - 12) });
-    const octUp = el('button', { textContent: '+8va', title: '1 オクターブ上げる', onclick: () => set('transpose', tr.transpose + 12) });
+    const octDown = el('button', { textContent: '−8va', title: t('track.octDownTitle'), onclick: () => set('transpose', tr.transpose - 12) });
+    const octUp = el('button', { textContent: '+8va', title: t('track.octUpTitle'), onclick: () => set('transpose', tr.transpose + 12) });
     const quant = el('select', { onchange: (e) => set('quantize', Number(e.target.value)) });
-    for (const [v, label] of [[0, 'なし'], [1, '4 分'], [2, '8 分'], [3, '3 連'], [4, '16 分']]) quant.append(el('option', { value: v, textContent: label }));
+    for (const v of [0, 1, 2, 3, 4]) quant.append(el('option', { value: v, textContent: t(`quant.${v}`) }));
     quant.value = tr.quantize;
-    const offset = el('input', { type: 'number', step: 10, value: tr.offsetMs, title: 'マイナスで前へ、プラスで後ろへ', onchange: (e) => set('offsetMs', Number(e.target.value)) });
+    const offset = el('input', { type: 'number', step: 10, value: tr.offsetMs, title: t('track.offsetTitle'), onchange: (e) => set('offsetMs', Number(e.target.value)) });
     const del = el('button', {
-      textContent: '削除',
+      textContent: t('track.delete'),
       onclick: () =>
         change(() => {
           project.tracks = project.tracks.filter((t) => t.id !== id);
@@ -984,8 +1005,8 @@ function render() {
     });
     // After Claude's clean-up the pre-clean-up notes are kept; let the user flip between them.
     const swap = el('button', {
-      textContent: '清書前と入れ替え',
-      title: 'Claude が清書する前のノートと入れ替えます（もう一度押すと戻ります）',
+      textContent: t('track.swap'),
+      title: t('track.swapTitle'),
       hidden: !tr.original,
       onclick: () =>
         change(() => {
@@ -1210,9 +1231,23 @@ function bind() {
       status(err.message, 'error');
     })
   );
-  $('songNew').addEventListener('click', () => askSongName('new', '新しい曲の名前', ''));
-  $('songCopy').addEventListener('click', () => askSongName('copy', '複製した曲の名前', `${project.name} のコピー`));
-  $('songRename').addEventListener('click', () => askSongName('rename', '曲の新しい名前', project.name));
+  $('songNew').addEventListener('click', () => askSongName('new', t('song.newTitle'), ''));
+  $('songCopy').addEventListener('click', () => askSongName('copy', t('song.copyTitle'), t('song.copyName', { name: project.name })));
+  $('songRename').addEventListener('click', () => askSongName('rename', t('song.renameTitle'), project.name));
+  for (const [code, label] of LANGS) $('lang').append(el('option', { value: code, textContent: label }));
+  $('lang').value = t.lang;
+  $('lang').addEventListener('change', (e) => {
+    try {
+      localStorage.setItem(LANG_KEY, e.target.value);
+    } catch {
+      /* private window etc.: the choice lasts until the page is closed */
+    }
+    t = translator(e.target.value);
+    applyStaticText();
+    $('soundfont').textContent = '';
+    render();
+    status(t('ready'));
+  });
   $('songDialogCancel').addEventListener('click', () => $('songDialog').close());
   $('songForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1270,6 +1305,7 @@ window.humming = {
   save,
 };
 
+applyStaticText();
 bind();
 await loadProject();
 // A fresh song starts with the delay measured earlier in this browser.
@@ -1284,4 +1320,4 @@ await loadProject();
 }
 setInterval(poll, 1500);
 requestAnimationFrame(frame);
-status('「● 録音」を押して鼻歌をどうぞ。');
+status(t('ready'));

@@ -1,6 +1,6 @@
 {
   "name": "humming-notes",
-  "description": "鼻歌をブラウザで録音して楽器のノートに変換し、重ね録りして MP3 / WAV / MIDI に書き出す",
+  "description": "Record humming in the browser, turn it into instrument notes, overdub parts and export MP3 / WAV / MIDI",
   "version": "0.1.0",
   "author": {
     "name": "dala00"

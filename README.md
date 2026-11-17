@@ -1,52 +1,63 @@
 # humming-notes
 
-鼻歌から曲を作る Claude Code スキル（プラグイン）です。
+English | [日本語](README.ja.md)
 
-1. ブラウザのページで鼻歌を録音する
-2. 指定した楽器のノート（MIDI 相当）に変換される
-3. それを鳴らしながら別のパートを重ね録りする
-4. Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に変換し直す。「下書き録音」をオンにすると生声のまま重ねていき、最後に「まとめて変換して」で全パートを見比べて変換できる
-5. Claude に「ベースにして」「ハモリを足して」などと頼んで整える
-6. MP3 / WAV / MIDI に書き出す
+A Claude Code skill (plugin) for making music by humming.
 
-音源セットの切り替え、リバーブ、パートごとの左右の定位もページで調整でき、書き出しにも反映されます。
+1. Record yourself humming on a page in the browser
+2. The take is converted to notes (MIDI-like) for the instrument you chose
+3. Overdub the next part while the earlier ones play
+4. Ask Claude to "clean it up" and it re-reads how your pitch actually moved and converts the take again, carefully. With "Draft recording" on, the takes stay as your own voice and you ask Claude to "convert them all" at the end, so it can compare every part
+5. Ask Claude for changes such as "make it a bass" or "add a harmony"
+6. Export MP3 / WAV / MIDI
 
-基本操作はブラウザ、丁寧な変換と編曲は Claude Code、という分担です。録音の遅延は「遅延を計測」で測れます。クリックに合わせて「あ」と声を出すだけで、結果はブラウザに記憶されます。ページ内の変換は即時の下書きで、清書前のノートはいつでも戻せます。
+The page also lets you switch sample sets, add reverb and pan each part; exports include all of it.
 
-## インストール
+The browser handles the hands-on work, Claude Code handles careful conversion and arranging. "Measure latency" measures the recording delay: you say "ah" along with a few clicks and the result is remembered in the browser. Conversion in the page is a quick draft, and the notes from before a clean-up can always be brought back.
+
+## Install
 
 ```
-/plugin marketplace add D:\users\documents\www\mine\humming-notes
+/plugin marketplace add <path to this repository>
 /plugin install humming-notes@humming-notes
 ```
 
-試すだけなら `claude --plugin-dir plugins/humming-notes` でも読み込めます。
-その後 Claude Code で「鼻歌で曲を作りたい」と言うか `/humming-notes:humming` を実行します。
+To just try it, `claude --plugin-dir plugins/humming-notes` works too.
+Then tell Claude Code "I want to make a song by humming" or run `/humming-notes:humming`.
 
-## 必要なもの
+## Requirements
 
-- Node.js 18 以上（追加の npm パッケージは不要）
-- Chrome / Edge などのブラウザとマイク。重ね録りはヘッドホン推奨
-- 楽器の音色は初回だけ [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts)（MusyngKite ほか）から取得し、`~/.cache/humming-notes/` にキャッシュします
+- Node.js 18 or later (no npm packages needed)
+- A browser such as Chrome or Edge, and a microphone. Headphones are recommended for overdubbing
+- Instrument samples are fetched once from [midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) (MusyngKite and others) and cached in `~/.cache/humming-notes/`
 
-## 構成
+## Language
+
+The page is in English, or in Japanese when the browser's language is Japanese. The "Language" menu at the top right of the page switches it, and the choice is remembered in the browser.
+
+Command-line messages follow the system language in the same way. `HUMMING_LANG=en` (or `ja`) or `--lang en` overrides it.
+
+All text lives in `scripts/i18n.mjs`; English is the base, and a key missing from another language falls back to it.
+
+## Layout
 
 ```
 plugins/humming-notes/skills/humming/
-  SKILL.md              Claude 向けの手順と project.json の仕様
-  scripts/humming.mjs   ローカルサーバー兼 CLI（serve / status / export / midi / curve / set-notes / restore / latency）
-  scripts/analyze.mjs   鼻歌 → ノート変換（YIN 法による音程検出）
-  scripts/shared.mjs    楽器一覧、クオンタイズ、MIDI ファイル生成
-  scripts/selftest.mjs  変換ロジックのテスト（node selftest.mjs）
-  web/                  録音・再生・書き出しを行うページ
+  SKILL.md              Instructions for Claude and the project.json format (Japanese)
+  scripts/humming.mjs   Local server and CLI (serve / status / export / midi / curve / set-notes / restore / latency)
+  scripts/analyze.mjs   Humming → notes (pitch detection with the YIN method)
+  scripts/shared.mjs    Instrument list, quantizing, MIDI file writer
+  scripts/i18n.mjs      Text for the page and the CLI (English and Japanese)
+  scripts/selftest.mjs  Tests (node selftest.mjs)
+  web/                  The page that records, plays and exports
 ```
 
-手動で起動する場合:
+To start it by hand:
 
 ```
 node plugins/humming-notes/skills/humming/scripts/humming.mjs serve --open
 ```
 
-曲のデータはカレントフォルダの `humming-projects/<名前>/` に保存されます（`project.json`、元の録音 `takes/`、書き出し `exports/`）。変更は自動で保存されます。
+Songs are stored in `humming-projects/<name>/` under the current folder (`project.json`, the original recordings in `takes/`, exports in `exports/`). Changes are saved automatically.
 
-曲はページの上部で管理できます。「曲」の一覧で切り替え、「新しい曲」で空の曲を作成、「複製」で録音ごとコピー、「名前を変更」でフォルダ名ごと改名します。起動時は最後に開いた曲が開きます。曲の削除はページにはないので、不要になったらフォルダを消してください。
+Songs are managed at the top of the page: the "Song" list switches between them, "New song" creates an empty one, "Duplicate" copies the current song with its recordings, and "Rename" renames it together with its folder. The server opens the song that was open last. The page has no delete; remove the folder when a song is no longer needed.
