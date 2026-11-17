@@ -2,6 +2,8 @@
 // Humming Notes: local server for the recording page, plus a small CLI for Claude.
 //
 //   node humming.mjs serve  [--project <dir>] [--port 4173] [--open]
+//       Without --project, every command uses the song last opened in humming-projects/
+//       (the page can create and switch songs), or humming-projects/default.
 //   node humming.mjs status [--port 4173]
 //   node humming.mjs export <mp3|wav> [--port 4173]      (rendered by the open page)
 //   node humming.mjs midi   [--project <dir>] [--out file.mid]   (no page needed)
@@ -45,8 +47,20 @@ function parseArgs(argv) {
   return args;
 }
 
+const SONGS_ROOT = 'humming-projects';
+const CURRENT_FILE = '.current'; // inside SONGS_ROOT: folder name of the song opened last
+
 function projectDir(args) {
-  return path.resolve(typeof args.project === 'string' ? args.project : path.join('humming-projects', 'default'));
+  if (typeof args.project === 'string') return path.resolve(args.project);
+  // The page can switch songs, so follow the one opened last.
+  let name = 'default';
+  try {
+    const cur = fs.readFileSync(path.join(SONGS_ROOT, CURRENT_FILE), 'utf8').trim();
+    if (cur && cur === folderName(cur) && fs.existsSync(path.join(SONGS_ROOT, cur, 'project.json'))) name = cur;
+  } catch {
+    /* nothing opened here yet */
+  }
+  return path.resolve(SONGS_ROOT, name);
 }
 
 function readProject(dir) {
@@ -58,6 +72,34 @@ function readProject(dir) {
 function safeName(name) {
   const base = String(name || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+/, '');
   return base || 'untitled';
+}
+
+// A song name as a folder name. Windows drops trailing dots and spaces, so do it up front.
+function folderName(name) {
+  return String(name || '')
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')
+    .replace(/^[. ]+|[. ]+$/g, '');
+}
+
+// Songs are the folders next to the open one that hold a project.json.
+function listSongs(root) {
+  const songs = [];
+  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    const file = path.join(root, e.name, 'project.json');
+    if (!fs.existsSync(file)) continue;
+    let name = e.name;
+    let tracks = 0;
+    try {
+      const p = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (typeof p.name === 'string' && p.name) name = p.name;
+      if (Array.isArray(p.tracks)) tracks = p.tracks.length;
+    } catch {
+      /* listed anyway; opening it reports the problem */
+    }
+    songs.push({ folder: e.name, name, tracks });
+  }
+  return songs.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
 }
 
 function stamp() {
@@ -163,16 +205,25 @@ function openBrowser(url) {
 }
 
 function serve(args) {
-  const dir = projectDir(args);
   const port = Number(args.port) || DEFAULT_PORT;
-  const projectFile = path.join(dir, 'project.json');
-  const takesDir = path.join(dir, 'takes');
-  const exportsDir = path.join(dir, 'exports');
-  fs.mkdirSync(takesDir, { recursive: true });
-  fs.mkdirSync(exportsDir, { recursive: true });
-  if (!fs.existsSync(projectFile)) {
-    fs.writeFileSync(projectFile, JSON.stringify(defaultProject(path.basename(dir)), null, 2));
+  const root = path.dirname(projectDir(args));
+  let dir;
+  let projectFile;
+  let takesDir;
+  let exportsDir;
+  // The page can switch songs, so the open folder changes while the server runs.
+  function openSong(next, name = path.basename(next)) {
+    dir = next;
+    projectFile = path.join(dir, 'project.json');
+    takesDir = path.join(dir, 'takes');
+    exportsDir = path.join(dir, 'exports');
+    fs.mkdirSync(takesDir, { recursive: true });
+    fs.mkdirSync(exportsDir, { recursive: true });
+    if (!fs.existsSync(projectFile)) fs.writeFileSync(projectFile, JSON.stringify(defaultProject(name), null, 2));
+    // Let later CLI calls without --project find this song.
+    if (root === path.resolve(SONGS_ROOT)) fs.writeFileSync(path.join(root, CURRENT_FILE), path.basename(dir));
   }
+  openSong(projectDir(args));
 
   const mtime = () => fs.statSync(projectFile).mtimeMs;
   const commands = new Map(); // id -> {id, type, format, state, file, error}
@@ -200,7 +251,9 @@ function serve(args) {
       if (p === '/api/project' && req.method === 'PUT') {
         const body = JSON.parse((await readBody(req)).toString('utf8'));
         // The file changed under the page (Claude edited it): make the page reload instead.
-        if (body.baseMtime != null && body.baseMtime !== mtime()) return send(res, 409, { mtime: mtime() });
+        // The same goes for a page that still shows a song another tab switched away from.
+        const stale = (body.dir != null && body.dir !== dir) || (body.baseMtime != null && body.baseMtime !== mtime());
+        if (stale) return send(res, 409, { mtime: mtime() });
         const tmp = projectFile + '.tmp';
         await fsp.writeFile(tmp, JSON.stringify(normalizeProject(body.project), null, 2));
         await fsp.rename(tmp, projectFile);
@@ -210,7 +263,45 @@ function serve(args) {
         lastPoll = Date.now();
         const pending = [...commands.values()].filter((c) => c.state === 'queued');
         for (const c of pending) c.state = 'running';
-        return send(res, 200, { mtime: mtime(), commands: pending });
+        return send(res, 200, { mtime: mtime(), dir, commands: pending });
+      }
+
+      // --- songs: the folders next to the open one
+      if (p === '/api/songs' && req.method === 'GET') {
+        return send(res, 200, { root, current: path.basename(dir), songs: listSongs(root) });
+      }
+      if (p === '/api/songs' && req.method === 'POST') {
+        const body = JSON.parse((await readBody(req)).toString('utf8'));
+        if (body.action === 'open') {
+          const song = listSongs(root).find((s) => s.folder === body.folder);
+          if (!song) return send(res, 404, { error: 'その曲が見つかりません。' });
+          openSong(path.join(root, song.folder));
+        } else if (['new', 'copy', 'rename'].includes(body.action)) {
+          const name = String(body.name || '').trim();
+          const folder = folderName(name);
+          if (!folder) return send(res, 400, { error: '曲の名前を入力してください。' });
+          const target = path.join(root, folder);
+          const inPlace = target === dir; // rename where only the title differs from the folder
+          if (fs.existsSync(target) && !(body.action === 'rename' && inPlace)) {
+            return send(res, 409, { error: `「${folder}」という曲はすでにあります。別の名前にしてください。` });
+          }
+          if (body.action === 'new') {
+            openSong(target, name);
+          } else {
+            const project = readProject(dir);
+            if (body.action === 'copy') {
+              await fsp.mkdir(target);
+              // Recordings come along; exports and backups stay with the original.
+              await fsp.cp(takesDir, path.join(target, 'takes'), { recursive: true });
+            } else if (!inPlace) {
+              await fsp.rename(dir, target);
+            }
+            writeProject(target, { ...project, name });
+            openSong(target);
+          }
+        } else return send(res, 400, { error: 'unknown action' });
+        console.log(`project: ${projectFile}`);
+        return send(res, 200, { current: path.basename(dir), dir });
       }
 
       // --- recorded takes

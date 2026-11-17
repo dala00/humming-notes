@@ -21,7 +21,7 @@ description: 鼻歌をブラウザで録音して楽器のノート（MIDI 相�
 node "${CLAUDE_SKILL_DIR}/scripts/humming.mjs" serve --project "<プロジェクトフォルダ>" --open
 ```
 
-- `--project` は曲ごとのフォルダ。省略時はカレントの `humming-projects/default`。ユーザーが曲名を言ったら `humming-projects/<曲名>` にする。
+- `--project` は曲ごとのフォルダ。省略すると、カレントの `humming-projects/` で最後に開いた曲（なければ `humming-projects/default`）が開く。ユーザーが曲名を言ったら `humming-projects/<曲名>` にする。
 - `--open` で既定のブラウザに `http://localhost:4173/` が開く。ポートを変えるときは `--port`（以降のコマンドにも同じ `--port` を付ける）。
 - 「ポートは使用中」と出たら、すでに起動済みの可能性が高い。`status` で確認し、同じプロジェクトならそのまま使う。
 - マイクの許可はユーザーがブラウザで行う。Claude が代わりに録音することはできない。
@@ -40,13 +40,26 @@ node "${CLAUDE_SKILL_DIR}/scripts/humming.mjs" serve --project "<プロジェク
 
 遅延（録音が再生やメトロノームに対してずれる量）は機器ごとに違う。「遅延を計測」で測った値はブラウザに記憶され、次の曲にも引き継がれる。計測せずに録り始めた場合は、2 つ目の録音が終わった時点でページが最初の 2 つを比べて自動で補正するが、それまでの録音中は 1 つ目の再生がメトロノームとずれて聞こえるので、先に計測するほうがよい。
 
+## 曲の管理
+
+曲は `humming-projects/` 以下のフォルダ 1 つずつ。ユーザーはページ上部で、サーバーを再起動せずに曲を管理できる。
+
+- **「曲」の一覧**: 選ぶとその曲に切り替わる。
+- **「新しい曲」**: 名前を付けて空の曲を作り、切り替える。
+- **「複製」**: 今の曲を録音ごと別名でコピーし、コピーに切り替える（`exports/` と退避ファイルはコピーしない）。
+- **「名前を変更」**: フォルダ名と `project.json` の `name` を変える。
+
+そのため、**開いている曲はユーザーの操作で変わる**。`project.json` を読む・書く前に `status` で `dir` を確かめ、そのフォルダを編集する。`curve` `set-notes` `restore` `latency` `midi` は `--project` を省略すると最後に開いた曲を対象にするので、ページで開いている曲と一致する。`humming-projects/` の外のフォルダを `--project` で開いているときは、以降のコマンドにも同じ `--project` を付ける。
+
+曲の削除はページにない。頼まれたら、どのフォルダを消すかをユーザーに確かめてから消す。
+
 ## 状態を見る
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/humming.mjs" status
 ```
 
-プロジェクトの場所、ページが開いているか、トラック一覧、書き出し済みファイルが JSON で返る。ノートの中身を見るときは `project.json` を直接読む。
+開いている曲のフォルダ（`dir`）、ページが開いているか、トラック一覧、書き出し済みファイルが JSON で返る。ノートの中身を見るときは `project.json` を直接読む。
 
 ## project.json の編集
 
@@ -54,7 +67,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/humming.mjs" status
 
 ```jsonc
 {
-  "name": "曲名",            // 書き出しファイル名に使う
+  "name": "曲名",            // 書き出しファイル名と、ページの曲一覧に使う
   "bpm": 100,                // メトロノーム、小節線、クオンタイズ、MIDI のテンポ
   "beatsPerBar": 4,
   "metronome": true,

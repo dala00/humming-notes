@@ -17,6 +17,7 @@ const REVERB_GAIN = 4;
 
 let project = null;
 let baseMtime = null;
+let songDir = null; // folder the loaded project came from
 let saveTimer = null;
 let saving = null;
 let mode = 'idle'; // idle | playing | recording | busy
@@ -67,7 +68,11 @@ async function loadProject() {
   } else {
     project = normalizeProject(json.project);
   }
+  // Another tab (or the server restarting elsewhere) switched songs: start over with that song.
+  if (songDir != null && json.dir !== songDir) return location.reload();
+  songDir = json.dir;
   baseMtime = json.mtime;
+  loadSongs();
   $('projectPath').textContent = `${json.dir}/project.json`.replace(/\\/g, '/');
   if (!trackById(selectedTrack)) {
     selectedTrack = project.tracks.length ? project.tracks[project.tracks.length - 1].id : null;
@@ -92,7 +97,7 @@ async function save() {
       const res = await fetch('/api/project', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project, baseMtime }),
+        body: JSON.stringify({ project, baseMtime, dir: songDir }),
       });
       if (res.status === 409) {
         status('project.json が外部（Claude）で更新されたため、そちらを読み込みました。', 'warn');
@@ -136,7 +141,7 @@ async function poll() {
   try {
     const res = await fetch('/api/poll');
     const json = await res.json();
-    if (json.mtime !== baseMtime && !isDirty() && mode !== 'recording' && mode !== 'busy') {
+    if ((json.mtime !== baseMtime || json.dir !== songDir) && !isDirty() && mode !== 'recording' && mode !== 'busy') {
       undoStack.length = 0;
       await loadProject();
       status('Claude 側の変更を読み込みました。', 'ok');
@@ -147,6 +152,44 @@ async function poll() {
   } catch {
     /* server gone; the next save reports it */
   }
+}
+
+// ------------------------------------------------------------------ songs
+
+// Each song is a folder next to the open one. Switching reloads the page,
+// so nothing of the previous song (takes, undo history) can leak into the next.
+async function loadSongs() {
+  const sel = $('song');
+  if (document.activeElement === sel) return;
+  try {
+    const { current, songs } = await (await fetch('/api/songs')).json();
+    sel.textContent = '';
+    for (const s of songs) sel.append(el('option', { value: s.folder, textContent: s.name === s.folder ? s.name : `${s.name}（${s.folder}）` }));
+    sel.value = current;
+    sel.dataset.current = current;
+  } catch {
+    /* server gone; the next save reports it */
+  }
+}
+
+// body: {action: 'open', folder} | {action: 'new' | 'copy' | 'rename', name}
+async function songAction(body) {
+  if (mode === 'playing') stop();
+  if (mode !== 'idle' || exporting) throw new Error('録音や書き出しが終わってから操作してください。');
+  if (isDirty()) await save();
+  const res = await fetch('/api/songs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `失敗しました: ${res.status}`);
+  location.reload();
+}
+
+function askSongName(action, title, initial) {
+  $('songDialogTitle').textContent = title;
+  $('songDialogName').value = initial;
+  $('songDialogError').textContent = '';
+  $('songForm').dataset.action = action;
+  $('songDialog').showModal();
+  $('songDialogName').select();
 }
 
 // ------------------------------------------------------------------ audio
@@ -867,7 +910,9 @@ function updateButtons() {
   $('play').disabled = mode === 'recording' || mode === 'busy';
   $('stop').disabled = mode === 'idle' || mode === 'busy';
   $('calibrate').disabled = mode !== 'idle';
-  for (const id of ['exportMp3', 'exportWav', 'exportMidi']) $(id).disabled = exporting || mode === 'recording' || mode === 'busy';
+  for (const id of ['exportMp3', 'exportWav', 'exportMidi', 'song', 'songNew', 'songCopy', 'songRename']) {
+    $(id).disabled = exporting || mode === 'recording' || mode === 'busy';
+  }
 }
 
 function fillInstrumentSelect(sel, value) {
@@ -892,7 +937,7 @@ function render() {
   const active = document.activeElement;
   if (!$('soundfont').options.length) for (const [n, label] of SOUNDFONTS) $('soundfont').append(el('option', { value: n, textContent: label }));
   $('soundfont').value = project.soundfont;
-  for (const id of ['name', 'bpm', 'beatsPerBar', 'countInBars', 'latencyMs', 'reverb']) {
+  for (const id of ['bpm', 'beatsPerBar', 'countInBars', 'latencyMs', 'reverb']) {
     if (active !== $(id)) $(id).value = project[id];
   }
   $('metronome').checked = project.metronome;
@@ -1157,7 +1202,22 @@ function onKey(e) {
 
 function bind() {
   const num = (id, key) => $(id).addEventListener('change', (e) => change(() => (project[key] = Number(e.target.value))));
-  $('name').addEventListener('change', (e) => change(() => (project.name = e.target.value.trim() || 'humming')));
+  // Pick up songs Claude created meanwhile, before the list opens.
+  $('song').addEventListener('pointerenter', loadSongs);
+  $('song').addEventListener('change', (e) =>
+    songAction({ action: 'open', folder: e.target.value }).catch((err) => {
+      e.target.value = e.target.dataset.current;
+      status(err.message, 'error');
+    })
+  );
+  $('songNew').addEventListener('click', () => askSongName('new', '新しい曲の名前', ''));
+  $('songCopy').addEventListener('click', () => askSongName('copy', '複製した曲の名前', `${project.name} のコピー`));
+  $('songRename').addEventListener('click', () => askSongName('rename', '曲の新しい名前', project.name));
+  $('songDialogCancel').addEventListener('click', () => $('songDialog').close());
+  $('songForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    songAction({ action: e.target.dataset.action, name: $('songDialogName').value }).catch((err) => ($('songDialogError').textContent = err.message));
+  });
   num('bpm', 'bpm');
   num('beatsPerBar', 'beatsPerBar');
   num('countInBars', 'countInBars');

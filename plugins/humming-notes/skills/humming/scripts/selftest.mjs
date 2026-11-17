@@ -2,6 +2,11 @@
 // Run: node selftest.mjs
 import { analyzeTake, measureLatency, measureClickLag } from './analyze.mjs';
 import { buildMidi, normalizeProject, effectiveNotes } from './shared.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const SR = 48000;
 function hum(melody, { detune = 0, vibrato = 0.2, noise = 0.01, breathy = false } = {}) {
@@ -110,6 +115,83 @@ if (!midiOk) failed++;
   const quiet = measureClickLag(new Float32Array(SR * 9).map(() => 0.002 * (Math.random() * 2 - 1)), SR, clicks);
   console.log(`${quiet === null ? 'ok  ' : 'FAIL'} click calibration with no voice gives no result`);
   if (quiet !== null) failed++;
+}
+
+// Song management: a real server in a scratch folder, driven the way the page drives it.
+{
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), 'humming.mjs');
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'humming-selftest-'));
+  const port = 4300 + Math.floor(Math.random() * 500);
+  const server = spawn(process.execPath, [script, 'serve', '--port', String(port)], { cwd, stdio: ['ignore', 'pipe', 'inherit'] });
+  const expect = (ok, name, detail = '') => {
+    console.log(`${ok ? 'ok  ' : 'FAIL'} songs: ${name}${ok || !detail ? '' : ` (${detail})`}`);
+    if (!ok) failed++;
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      server.stdout.on('data', (d) => String(d).includes('Humming Notes') && resolve());
+      server.on('exit', () => reject(new Error('server exited')));
+      setTimeout(() => reject(new Error('server did not start')), 10000);
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const get = async (p) => (await fetch(base + p)).json();
+    const post = async (body) => {
+      const res = await fetch(`${base}/api/songs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return { status: res.status, ...(await res.json()) };
+    };
+    const songs = async () => (await get('/api/songs')).songs.map((s) => s.folder).sort().join(',');
+    const root = path.join(cwd, 'humming-projects');
+    const cli = (...a) => execFileSync(process.execPath, [script, ...a], { cwd, encoding: 'utf8' });
+
+    expect((await songs()) === 'default', 'starts with the default song');
+
+    // Give the default song a recording and a track, as the page would.
+    await fetch(`${base}/takes/t1.wav`, { method: 'PUT', body: new Uint8Array([1, 2, 3]) });
+    const first = await get('/api/project');
+    first.project.tracks.push({ id: 't1', name: 'a', instrument: 'flute', take: 'takes/t1.wav', notes: [{ t: 0, d: 0.5, p: 60 }] });
+    const put = (body) => fetch(`${base}/api/project`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    expect((await put({ project: first.project, baseMtime: first.mtime, dir: first.dir })).status === 200, 'page save');
+
+    const made = await post({ action: 'new', name: 'second song' });
+    const second = await get('/api/project');
+    expect(made.status === 200 && second.project.name === 'second song' && second.project.tracks.length === 0, 'new song is empty and open');
+    expect((await songs()) === 'default,second song', 'new song is listed');
+    expect((await post({ action: 'new', name: 'default' })).status === 409, 'existing name is refused');
+    expect((await post({ action: 'new', name: ' .. ' })).status === 400, 'empty name is refused');
+    expect(fs.readdirSync(cwd).join(',') === 'humming-projects', 'nothing is written outside the songs folder');
+
+    // A page still showing the first song must not overwrite the second one.
+    expect((await put({ project: first.project, dir: first.dir })).status === 409, 'save from a stale page is refused');
+    expect(cli('midi', '--out', path.join(cwd, 'x.mid')).trim().endsWith('x.mid') === true, 'CLI runs without --project');
+    expect(JSON.parse(cli('status', '--port', String(port))).dir === path.join(root, 'second song'), 'status reports the open song');
+
+    await post({ action: 'open', folder: 'default' });
+    const copied = await post({ action: 'copy', name: 'a/copy' });
+    const copy = await get('/api/project');
+    expect(
+      copied.current === 'a_copy' && copy.project.name === 'a/copy' && copy.project.tracks.length === 1 && fs.existsSync(path.join(root, 'a_copy', 'takes', 't1.wav')),
+      'copy keeps tracks and recordings',
+      JSON.stringify(copied)
+    );
+    expect(fs.existsSync(path.join(root, 'default', 'takes', 't1.wav')), 'copy leaves the original alone');
+
+    const renamed = await post({ action: 'rename', name: 'renamed' });
+    const after = await get('/api/project');
+    expect(
+      renamed.status === 200 && after.project.name === 'renamed' && after.project.tracks.length === 1 && !fs.existsSync(path.join(root, 'a_copy')) && fs.existsSync(path.join(root, 'renamed', 'takes', 't1.wav')),
+      'rename moves the folder with its recordings',
+      JSON.stringify(renamed)
+    );
+    expect((await songs()) === 'default,renamed,second song', 'list after copy and rename');
+    expect((await post({ action: 'open', folder: '../x' })).status === 404, 'unknown song is refused');
+    expect(fs.readFileSync(path.join(root, '.current'), 'utf8') === 'renamed', 'last opened song is remembered');
+  } catch (e) {
+    expect(false, 'server test', e.message);
+  } finally {
+    server.kill();
+    await new Promise((r) => (server.exitCode != null ? r() : server.on('exit', r)));
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 }
 
 process.exit(failed ? 1 : 0);

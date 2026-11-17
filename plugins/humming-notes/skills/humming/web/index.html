@@ -9,7 +9,10 @@
 <body>
 <header>
   <h1>Humming Notes</h1>
-  <label>曲名 <input id="name" type="text" size="16"></label>
+  <label title="この曲を選ぶと、その曲に切り替わります。変更は自動で保存されます。">曲 <select id="song"></select></label>
+  <button id="songNew" title="空の曲を新しく作って切り替えます。今の曲はそのまま残ります。">新しい曲</button>
+  <button id="songCopy" title="今の曲を録音ごと別の名前で複製し、複製のほうに切り替えます。">複製</button>
+  <button id="songRename" title="今の曲の名前（フォルダ名と書き出しファイル名）を変えます。">名前を変更</button>
   <label>BPM <input id="bpm" type="number" min="30" max="300" step="1"></label>
   <label>拍子 <input id="beatsPerBar" type="number" min="1" max="12" step="1"> /4</label>
   <label><input id="metronome" type="checkbox"> メトロノーム</label>
@@ -58,8 +61,19 @@
 </section>
 
 <footer class="hint">
-  このページは Claude Code と同じ <code id="projectPath">project.json</code> を共有しています。変換が粗いときは Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に直します。ほかにも「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
+  変更は自動で <code id="projectPath">project.json</code> に保存されます。このファイルは Claude Code と共有しています。変換が粗いときは Claude に「清書して」と頼むと、歌った音程の動きを読み直して丁寧に直します。ほかにも「2 番目のトラックをベースにして」「ハモリを足して」「MP3 にして」のように頼めます。
 </footer>
+
+<dialog id="songDialog">
+  <form id="songForm">
+    <label><span id="songDialogTitle"></span><br><input id="songDialogName" type="text" size="28" maxlength="60" autocomplete="off"></label>
+    <div id="songDialogError" class="status error"></div>
+    <div class="buttons">
+      <button type="button" id="songDialogCancel">キャンセル</button>
+      <button type="submit" id="songDialogOk">OK</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="/vendor/lame.min.js"></script>
 <script type="module" src="/app.js"></script>

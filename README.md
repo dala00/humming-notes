@@ -47,4 +47,6 @@ plugins/humming-notes/skills/humming/
 node plugins/humming-notes/skills/humming/scripts/humming.mjs serve --open
 ```
 
-曲のデータはカレントフォルダの `humming-projects/<名前>/` に保存されます（`project.json`、元の録音 `takes/`、書き出し `exports/`）。
+曲のデータはカレントフォルダの `humming-projects/<名前>/` に保存されます（`project.json`、元の録音 `takes/`、書き出し `exports/`）。変更は自動で保存されます。
+
+曲はページの上部で管理できます。「曲」の一覧で切り替え、「新しい曲」で空の曲を作成、「複製」で録音ごとコピー、「名前を変更」でフォルダ名ごと改名します。起動時は最後に開いた曲が開きます。曲の削除はページにはないので、不要になったらフォルダを消してください。
