@@ -378,9 +378,13 @@ function playNote(actx, dest, instrument, midi, when, dur, vel) {
   return src;
 }
 
-// Schedule the whole project on `actx` so that project time `from` sounds at `t0`.
+// Prepare the whole project on `actx` so that project time `from` sounds at `t0`.
+// Returns { nodes, pump }: pump(horizon) creates the notes that start before project time `horizon`,
+// pump() creates all that are left. Live playback pumps a little ahead of the clock, because
+// thousands of pending nodes at once overload the audio thread; offline rendering pumps everything.
 function scheduleProject(actx, dest, t0, from) {
   const nodes = [];
+  const pending = [];
   for (const tr of project.tracks) {
     if (tr.mute) continue;
     const g = actx.createGain();
@@ -405,11 +409,29 @@ function scheduleProject(actx, dest, t0, from) {
     }
     for (const n of effectiveNotes(project, tr)) {
       if (n.t + n.d <= from) continue;
-      const late = Math.max(0, from - n.t);
-      nodes.push(playNote(actx, g, tr.instrument, n.p, t0 + Math.max(0, n.t - from), n.d - late, n.v));
+      pending.push({ g, instrument: tr.instrument, n });
     }
   }
-  return nodes;
+  pending.sort((a, b) => a.n.t - b.n.t);
+  let next = 0;
+  const pump = (horizon = Infinity) => {
+    for (; next < pending.length && pending[next].n.t < horizon; next++) {
+      const { g, instrument, n } = pending[next];
+      const late = Math.max(0, from - n.t);
+      nodes.push(playNote(actx, g, instrument, n.p, t0 + Math.max(0, n.t - from), n.d - late, n.v));
+    }
+  };
+  return { nodes, pump };
+}
+
+// Keep a live session's notes scheduled a little ahead of the audio clock.
+const SCHEDULE_AHEAD = 2;
+function startProject(s) {
+  const { nodes, pump } = scheduleProject(ctx, master, s.t0, s.from);
+  s.nodes = nodes;
+  const tick = () => pump(s.from + ctx.currentTime - s.t0 + SCHEDULE_AHEAD);
+  tick();
+  s.pumpTimer = setInterval(tick, 200);
 }
 
 function click(when, accent) {
@@ -444,6 +466,7 @@ function startMetronome(s, firstBeat, lastBeat, keepGoing) {
 function stopSession() {
   if (!session) return;
   clearInterval(session.metroTimer);
+  clearInterval(session.pumpTimer);
   for (const n of session.nodes) {
     try {
       n.stop();
@@ -477,7 +500,8 @@ async function play() {
   refreshMaster();
   const from = cursor >= dur - 0.05 ? 0 : cursor;
   const t0 = ctx.currentTime + 0.12;
-  session = { kind: 'play', t0, from, end: dur, nodes: scheduleProject(ctx, master, t0, from) };
+  session = { kind: 'play', t0, from, end: dur };
+  startProject(session);
   if (project.metronome) startMetronome(session, Math.ceil(from / beatSec() - 1e-6), 0, true);
   mode = 'playing';
   if (!$('status').classList.contains('warn')) status(t('play.playing'));
@@ -551,10 +575,10 @@ async function record() {
     t0,
     from,
     end: Infinity,
-    nodes: scheduleProject(ctx, master, t0, from),
     chunks: [],
     instrument: project.next.instrument,
   };
+  startProject(session);
   const s = session;
   mic.node.port.onmessage = (e) => {
     if (e.data.done) s.onDone && s.onDone();
@@ -822,8 +846,17 @@ async function renderMix() {
   await preload();
   const dur = duration();
   if (dur <= 0) throw new Error(t('export.empty'));
-  const octx = new OfflineAudioContext(2, Math.ceil((dur + 1 + (project.reverb > 0 ? project.reverbTime : 0.5)) * EXPORT_RATE), EXPORT_RATE);
-  scheduleProject(octx, buildMaster(octx), 0, 0);
+  const total = dur + 1 + (project.reverb > 0 ? project.reverbTime : 0.5);
+  const octx = new OfflineAudioContext(2, Math.ceil(total * EXPORT_RATE), EXPORT_RATE);
+  // Feed the notes in as the render advances, the same way live playback does.
+  const { pump } = scheduleProject(octx, buildMaster(octx), 0, 0);
+  pump(SCHEDULE_AHEAD);
+  for (let at = 1; at < total; at++) {
+    octx.suspend(at).then(() => {
+      pump(at + SCHEDULE_AHEAD);
+      octx.resume();
+    });
+  }
   const mix = await octx.startRendering();
   // Bring the loudest point to about -1 dBFS so exports are not quiet.
   let peak = 0;
@@ -1297,6 +1330,10 @@ window.humming = {
   },
   get mode() {
     return mode;
+  },
+  // Project time being heard right now, or null when stopped. Falls behind the wall clock if the audio thread is overloaded.
+  get playhead() {
+    return playhead();
   },
   addTake,
   renderMix,
